@@ -269,8 +269,17 @@ async function writeScores(assignmentId, byStudent, maxUpdated) {
     observations_fetched: 0,
     notes: "GH Action basic scoring (no rarity/assists)"
   }];
-  const { json } = await http("POST", `${PGR}/score_runs?on_conflict=id`, run, HDR);
-  const runId = json?.[0]?.id; if (!runId) throw new Error("score_run insert failed");
+
+  // Ask PostgREST to return the inserted row so we get the id
+  const { json } = await http(
+    "POST",
+    `${PGR}/score_runs`,            // no need for on_conflict here
+    run,
+    { ...HDR, Prefer: "return=representation" }
+  );
+
+  const runId = Array.isArray(json) ? json[0]?.id : null;
+  if (!runId) throw new Error("score_run insert failed");
 
   const entries = [];
   for (const [sid, m] of byStudent) {
@@ -285,6 +294,7 @@ async function writeScores(assignmentId, byStudent, maxUpdated) {
   if (entries.length) await upsert("score_entries", entries, "id");
   console.log(`✓ ${assignmentId}: score run ${runId} with ${entries.length} entries.`);
 }
+
 
 /* Ingest (per assignment) */
 async function ingest(assignmentId) {
