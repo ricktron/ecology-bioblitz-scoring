@@ -1,0 +1,24 @@
+name: Ingest & Score (BioBlitz)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "16 9 * * *" # daily at 09:16 UTC (change as you like)
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      ASSIGNMENT_ID: ${{ secrets.ASSIGNMENT_ID }}
+      INAT_BASE: ${{ secrets.INAT_BASE }}
+      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: node ingest.mjs
