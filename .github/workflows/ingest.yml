@@ -1,6 +1,14 @@
+# .github/workflows/ingest.yml
 name: Ingest & Score (BioBlitz)
+
 on:
   workflow_dispatch: {}
+  schedule:
+    - cron: "*/15 * * * *"    # every 15 minutes (tweak as you like)
+
+concurrency:
+  group: bioblitz-ingest
+  cancel-in-progress: true     # avoids overlapping runs
 
 jobs:
   run:
@@ -8,17 +16,11 @@ jobs:
     env:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}   # <-- add this
-      ASSIGNMENT_ID: ${{ secrets.ASSIGNMENT_ID }}     # <-- keep if you want single-ID runs too
+      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       INAT_BASE: ${{ secrets.INAT_BASE }}
-      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }} # keep at 1 to be a good API citizen
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
-
-      # Optional: quick debug to confirm env was passed (prints lengths only)
-      - name: Debug env (lengths only)
-        run: node -e "console.log('ASSIGNMENT_IDS length:', (process.env.ASSIGNMENT_IDS||'').length, 'ASSIGNMENT_ID length:', (process.env.ASSIGNMENT_ID||'').length)"
-
       - run: node ingest.mjs
