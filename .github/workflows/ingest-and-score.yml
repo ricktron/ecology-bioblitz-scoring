@@ -98,28 +98,31 @@ jobs:
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: Choose DB URL and handshake
-        id: pickdb
-        run: |
-          set -euo pipefail
-          USE_URL="${SUPABASE_DB_URL:-}"
-          if [ -n "$USE_URL" ]; then
-            if ! psql -4 "$USE_URL" -Atc "select 1" >/dev/null 2>&1; then
-              if [ -n "${SUPABASE_POOL_URL:-}" ] && psql -4 "$SUPABASE_POOL_URL" -Atc "select 1" >/dev/null 2>&1; then
-                USE_URL="$SUPABASE_POOL_URL"
-              else
-                echo "DB handshake failed. Check SUPABASE_DB_URL or SUPABASE_POOL_URL."; exit 1
-              fi
-            fi
-          else
-            if [ -n "${SUPABASE_POOL_URL:-}" ]; then
-              USE_URL="$SUPABASE_POOL_URL"
-            else
-              echo "No DB URL secret set."; exit 1
-            fi
-          fi
-          echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
-          echo "Handshake OK."
+- name: Choose DB URL and handshake
+  id: pickdb
+  run: |
+    set -euo pipefail
+    try() {
+      url="$1"
+      host=$(printf '%s' "$url" | sed -E 's@.*://[^@]*@//REDACTED@; s@^.*@&@')
+      echo "Trying connection to: $host"
+      # Show connection info and run a trivial query; verbose to surface error cause
+      psql -4 "$url" -v VERBOSITY=verbose -c "\conninfo"
+      psql -4 "$url" -Atc "select 1"
+    }
+    if [ -n "${SUPABASE_DB_URL:-}" ] && try "$SUPABASE_DB_URL"; then
+      USE_URL="$SUPABASE_DB_URL"
+    elif [ -n "${SUPABASE_POOL_URL:-}" ] && try "$SUPABASE_POOL_URL"; then
+      USE_URL="$SUPABASE_POOL_URL"
+    else
+      echo "DB handshake failed. Re-check SUPABASE_DB_URL and SUPABASE_POOL_URL:"
+      echo "• Use 'postgres' user and your **database password**."
+      echo "• Include '?sslmode=require'."
+      echo "• If password has special chars, URL-encode or use a simpler password."
+      exit 1
+    fi
+    echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
+    echo "Handshake OK."
 
       - name: Generate SQL with correct id column
         run: |
