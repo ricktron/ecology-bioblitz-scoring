@@ -1,4 +1,4 @@
-name: Ingest iNat and Score • vENVDEBUG6_FULL
+name: "Ingest iNat and Score • vENVDEBUG7"
 
 on: { workflow_dispatch: {} }
 
@@ -31,31 +31,26 @@ jobs:
       SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
     steps:
-      - name: Checkout
+      - name: "Checkout"
         uses: actions/checkout@v4
 
-      - name: Setup Node 20
+      - name: "Setup Node 20"
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Debug (shell): API secrets presence
+      - name: "Debug (shell) — API secrets presence"
         run: |
           set -e
           for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: Debug (node): env booleans
+      - name: "Debug (node) — env booleans"
         run: |
-          node -e "console.log({
-            SUPABASE_URL: !!process.env.SUPABASE_URL,
-            SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-            SB_URL: !!process.env.SB_URL,
-            SB_KEY: !!process.env.SB_KEY
-          })"
+          node -e "const b=v=>!!process.env[v];console.log({SUPABASE_URL:b('SUPABASE_URL'),SUPABASE_SERVICE_ROLE_KEY:b('SUPABASE_SERVICE_ROLE_KEY'),SB_URL:b('SB_URL'),SB_KEY:b('SB_KEY')})"
 
-      - name: Run iNat ingestion script
+      - name: "Run iNat ingestion script"
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
@@ -68,19 +63,19 @@ jobs:
           set -euo pipefail
           node ingest.mjs
 
-      - name: Install psql client
+      - name: "Install psql client"
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Debug (shell): DB secrets presence
+      - name: "Debug (shell) — DB secrets presence"
         run: |
           set -e
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: Choose DB URL and handshake
+      - name: "Choose DB URL and handshake"
         id: pickdb
         env:
           DB1: ${{ secrets.SUPABASE_DB_URL }}
@@ -102,7 +97,7 @@ jobs:
           echo "use_url=$use" >> "$GITHUB_OUTPUT"
           echo "Handshake OK"
 
-      - name: Generate SQL with correct id column
+      - name: "Generate SQL with correct id column"
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
@@ -119,7 +114,7 @@ jobs:
           sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
           echo "Detected ID_COL=$ID_COL and generated sql/_gen_leaderboard_views.sql"
 
-      - name: Apply / update views (idempotent)
+      - name: "Apply / update views (idempotent)"
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
