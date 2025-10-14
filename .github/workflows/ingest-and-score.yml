@@ -1,10 +1,8 @@
-name: Ingest iNat and Score vENVDEBUG5
+name: Ingest iNat and Score • vENVDEBUG6_MIN
 
-on:
-  workflow_dispatch:
+on: { workflow_dispatch: {} }
 
-permissions:
-  contents: read
+permissions: { contents: read }
 
 concurrency:
   group: ingest-and-score
@@ -13,24 +11,6 @@ concurrency:
 jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
-
-    env:
-      # Supabase HTTP API (for ingest.mjs)
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # Aliases that your script originally looked for
-      SB_URL: ${{ secrets.SUPABASE_URL }}
-      SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # iNat / runtime knobs (ok if unset)
-      INAT_BASE: ${{ secrets.INAT_BASE }}
-      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-
-      # Postgres (for psql)
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,88 +20,5 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Debug (shell): API secrets presence
-        run: |
-          set -e
-          for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
-            if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
-          done
-
-      - name: Debug (node): env booleans
-        run: |
-          node -e "console.log({
-            SUPABASE_URL: !!process.env.SUPABASE_URL,
-            SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
-            SB_URL: !!process.env.SB_URL,
-            SB_KEY: !!process.env.SB_KEY
-          })"
-
-      - name: Run iNat ingestion script
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SB_URL: ${{ secrets.SUPABASE_URL }}
-          SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          INAT_BASE: ${{ secrets.INAT_BASE }}
-          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-        run: |
-          set -euo pipefail
-          node ingest.mjs
-
-      - name: Install psql client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
-
-      - name: Debug (shell): DB secrets presence
-        run: |
-          set -e
-          for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
-            if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
-          done
-
-      - name: Choose DB URL and handshake
-        id: pickdb
-        env:
-          DB1: ${{ secrets.SUPABASE_DB_URL }}
-          DB2: ${{ secrets.SUPABASE_POOL_URL }}
-        run: |
-          set -euo pipefail
-          use="$DB1"
-          if [ -n "$use" ]; then
-            echo "Trying direct (5432)"
-            psql -4 "$use" -v VERBOSITY=verbose -c "\conninfo"
-            psql -4 "$use" -Atc "select 1"
-          else
-            use="$DB2"
-            [ -n "$use" ] || { echo "No DB URL present."; exit 1; }
-            echo "Trying pooler (6543)"
-            psql -4 "$use" -v VERBOSITY=verbose -c "\conninfo"
-            psql -4 "$use" -Atc "select 1"
-          fi
-          echo "use_url=$use" >> "$GITHUB_OUTPUT"
-          echo "Handshake OK"
-
-      - name: Generate SQL with correct id column
-        run: |
-          set -euo pipefail
-          USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          ID_COL=$(psql -4 "$USE_URL" -Atc "
-            select column_name
-            from information_schema.columns
-            where table_schema='public'
-              and table_name='daily_scores'
-              and column_name in ('student_id','roster_id','person_id')
-            limit 1;")
-          if [ -z "$ID_COL" ]; then
-            echo 'Could not detect id column in public.daily_scores'; exit 1
-          fi
-          sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
-          echo "Detected ID_COL=$ID_COL and generated sql/_gen_leaderboard_views.sql"
-
-      - name: Apply / update views (idempotent)
-        run: |
-          set -euo pipefail
-          USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          psql -4 "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
+      - name: Sanity echo
+        run: echo "Workflow parses and runs ✔"
