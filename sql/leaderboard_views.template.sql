@@ -1,3 +1,4 @@
+-- Trip window config
 create table if not exists public.spider_trip_windows_v1 (
   trip_key   text primary key,
   start_date date not null,
@@ -10,6 +11,7 @@ on conflict (trip_key) do update
 set start_date = excluded.start_date,
     end_date   = excluded.end_date;
 
+-- Participants
 create or replace view public.active_participants_v1 as
 select
   r.id                        as roster_id,
@@ -21,6 +23,7 @@ join public.student_identities si on si.user_id = r.id
 where si.provider = 'inat'
   and coalesce(si.active, true);
 
+-- Daily scoreboard
 create or replace view public.scoreboard_day_v1 as
 with base as (
   select
@@ -60,6 +63,7 @@ from public.scoreboard_day_v1 d
 where d.is_adult
 group by d.score_date;
 
+-- Trip leaderboard
 create or replace view public.leaderboard_trip_v1 as
 with tw as (
   select start_date, end_date
@@ -101,8 +105,10 @@ select
 from public.leaderboard_trip_v1 l
 where l.is_adult;
 
+-- Minimal index for date filter
 create index if not exists idx_daily_scores_date on public.daily_scores(score_date);
--- add one of these manually later once you know the id col:
--- create index if not exists idx_daily_scores_student on public.daily_scores(student_id);
--- create index if not exists idx_daily_scores_roster  on public.daily_scores(roster_id);
--- create index if not exists idx_daily_scores_person  on public.daily_scores(person_id);
+-- After the workflow runs once and detects your id column, add the matching index manually:
+--   create index if not exists idx_daily_scores_student on public.daily_scores(student_id);
+--   -- or:
+--   create index if not exists idx_daily_scores_roster  on public.daily_scores(roster_id);
+--   create index if not exists idx_daily_scores_person  on public.daily_scores(person_id);
