@@ -1,7 +1,8 @@
-name: Ingest iNat and Score • vENVDEBUG
+name: Ingest iNat and Score • vENVDEBUG2
 
 on:
   workflow_dispatch:
+  # comment this out while debugging to reduce noise:
   schedule:
     - cron: "*/30 * * * *"
   push:
@@ -22,14 +23,19 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Supabase HTTP API (used by ingest.mjs)
+      # HTTP API (what the script needs)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # iNat / runtime (if your script uses them)
+      # also provide the aliases your script might read:
+      SB_URL: ${{ secrets.SUPABASE_URL }}
+      SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # iNat / runtime knobs
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-      # Postgres for psql (views)
+
+      # Postgres (for psql)
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # 5432 URI with ?sslmode=require
       SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}  # optional 6543 pooler URI
 
@@ -50,32 +56,97 @@ jobs:
           else echo "No package.json found; skipping"
           fi
 
-      # --- Export to GITHUB_ENV so every later shell (and Node) definitely sees them ---
-      - name: Export API env (explicit)
-        run: |
-          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> "$GITHUB_ENV"
-          echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> "$GITHUB_ENV"
-          echo "INAT_BASE=${{ secrets.INAT_BASE }}" >> "$GITHUB_ENV"
-          echo "ASSIGNMENT_IDS=${{ secrets.ASSIGNMENT_IDS }}" >> "$GITHUB_ENV"
-          echo "RATE_LIMIT_RPS=${{ secrets.RATE_LIMIT_RPS }}" >> "$GITHUB_ENV"
-
-      # --- Shell-level confirmation (masked) ---
+      # ---- DEBUG (shell + node) ----
       - name: Debug (shell): API secrets presence
         run: |
-          test -n "${SUPABASE_URL:-}" && echo "SUPABASE_URL: SET" || echo "SUPABASE_URL: EMPTY"
-          test -n "${SUPABASE_SERVICE_ROLE_KEY:-}" && echo "SUPABASE_SERVICE_ROLE_KEY: SET" || echo "SUPABASE_SERVICE_ROLE_KEY: EMPTY"
-          test -n "${INAT_BASE:-}" && echo "INAT_BASE: SET" || echo "INAT_BASE: EMPTY"
-          test -n "${ASSIGNMENT_IDS:-}" && echo "ASSIGNMENT_IDS: SET" || echo "ASSIGNMENT_IDS: EMPTY"
-          test -n "${RATE_LIMIT_RPS:-}" && echo "RATE_LIMIT_RPS: SET" || echo "RATE_LIMIT_RPS: EMPTY"
+          for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
+            if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
+          done
 
-      # --- Node-level confirmation (booleans only) ---
       - name: Debug (node): does Node see the env?
         run: |
-          node -e "console.log('Node sees SUPABASE_URL?', !!process.env.SUPABASE_URL, 'SUPABASE_SERVICE_ROLE_KEY?', !!process.env.SUPABASE_SERVICE_ROLE_KEY)"
+          node -e "console.log({
+            SUPABASE_URL: !!process.env.SUPABASE_URL,
+            SUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+            SB_URL: !!process.env.SB_URL,
+            SB_KEY: !!process.env.SB_KEY
+          })"
 
-      # --- Ingest ---
+      # ---- INGEST ----
       - name: Run iNat ingestion script
         env:
+          # belt + suspenders: pass both naming styles explicitly again
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          INAT_BASE:_
+          SB_URL: ${{ secrets.SUPABASE_URL }}
+          SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INAT_BASE: ${{ secrets.INAT_BASE }}
+          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+        run: |
+          set -euo pipefail
+          node ingest.mjs
+
+      # ---- SQL/views deployment ----
+      - name: Install psql client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Debug (shell): DB secrets presence
+        run: |
+          for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
+            if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
+          done
+
+      - name: Choose DB URL (direct or pool) + handshake
+        id: pickdb
+        run: |
+          set -euo pipefail
+          USE_URL="${SUPABASE_DB_URL:-}"
+          if [ -n "$USE_URL" ]; then
+            if ! psql -4 "$USE_URL" -Atc "select 1" >/dev/null 2>&1; then
+              if [ -n "${SUPABASE_POOL_URL:-}" ] && psql -4 "$SUPABASE_POOL_URL" -Atc "select 1" >/dev/null 2>&1; then
+                USE_URL="$SUPABASE_POOL_URL"
+              else
+                echo "DB handshake failed. Check SUPABASE_DB_URL or SUPABASE_POOL_URL secrets."; exit 1
+              fi
+            fi
+          else
+            if [ -n "${SUPABASE_POOL_URL:-}" ]; then
+              USE_URL="$SUPABASE_POOL_URL"
+            else
+              echo "No DB URL secret set."; exit 1
+            fi
+          fi
+          echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
+          echo "Handshake OK."
+
+      - name: Generate SQL with correct id column
+        run: |
+          set -euo pipefail
+          USE_URL="${{ steps.pickdb.outputs.use_url }}"
+          ID_COL=$(psql -4 "$USE_URL" -Atc "
+            select column_name
+            from information_schema.columns
+            where table_schema='public'
+              and table_name='daily_scores'
+              and column_name in ('student_id','roster_id','person_id')
+            limit 1;")
+          if [ -z "$ID_COL" ]; then
+            echo 'Could not detect id column in public.daily_scores'; exit 1
+          fi
+          echo "Detected ID_COL=$ID_COL"
+          if [ ! -f sql/leaderboard_views.template.sql ]; then
+            echo "Missing sql/leaderboard_views.template.sql"; exit 1
+          fi
+          sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
+          echo "Generated sql/_gen_leaderboard_views.sql"
+
+      - name: Apply / update views (idempotent)
+        run: |
+          set -euo pipefail
+          USE_URL="${{ steps.pickdb.outputs.use_url }}"
+          echo "Handshake details:"
+          psql -4 "$USE_URL" -Atc "select current_user, current_database(), inet_server_addr(), inet_client_addr(), version();"
+          psql -4 "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
