@@ -3,7 +3,7 @@ name: Ingest iNat and Score
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/30 * * * *"   # every 30 min
   push:
     paths:
       - .github/workflows/ingest-and-score.yml
@@ -20,13 +20,21 @@ concurrency:
 jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
+
+    # Make required secrets available to all steps
     env:
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # Postgres URI (5432) with ?sslmode=require
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}  # optional pooler (6543)
-      INAT_APP_ID: ${{ secrets.INAT_APP_ID }}
-      INAT_APP_SECRET: ${{ secrets.INAT_APP_SECRET }}
-      INAT_USERNAME: ${{ secrets.INAT_USERNAME }}
-      INAT_PASSWORD: ${{ secrets.INAT_PASSWORD }}
+      # Supabase HTTP API (for your ingest.mjs)
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # iNat + run-time knobs your script expects
+      INAT_BASE: ${{ secrets.INAT_BASE }}
+      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+
+      # Postgres (for psql steps below)
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}        # direct connection (5432) with ?sslmode=require
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}    # optional pooler (6543) as fallback
 
     steps:
       - name: Checkout
@@ -45,19 +53,37 @@ jobs:
           else echo "No package.json found; skipping"
           fi
 
+      # Helpful: verify API secrets are present (masked in logs)
+      - name: Debug: API secrets presence (masked)
+        run: |
+          test -n "${SUPABASE_URL:-}" && echo "SUPABASE_URL: SET" || echo "SUPABASE_URL: EMPTY"
+          test -n "${SUPABASE_SERVICE_ROLE_KEY:-}" && echo "SUPABASE_SERVICE_ROLE_KEY: SET" || echo "SUPABASE_SERVICE_ROLE_KEY: EMPTY"
+          test -n "${INAT_BASE:-}" && echo "INAT_BASE: SET" || echo "INAT_BASE: EMPTY"
+          test -n "${ASSIGNMENT_IDS:-}" && echo "ASSIGNMENT_IDS: SET" || echo "ASSIGNMENT_IDS: EMPTY"
+          test -n "${RATE_LIMIT_RPS:-}" && echo "RATE_LIMIT_RPS: SET" || echo "RATE_LIMIT_RPS: EMPTY"
+
       - name: Run iNat ingestion script
+        env:
+          # (Redundant but explicit for this step)
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INAT_BASE: ${{ secrets.INAT_BASE }}
+          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
         run: |
           set -euo pipefail
-          if [ -f ingest.mjs ]; then
-            node ingest.mjs
-          else
-            echo "ingest.mjs not found; skipping ingest."
-          fi
+          node ingest.mjs
 
       - name: Install psql client
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
+
+      # Optional: verify DB secrets are present
+      - name: Debug: DB secrets presence (masked)
+        run: |
+          test -n "${SUPABASE_DB_URL:-}" && echo "SUPABASE_DB_URL: SET" || echo "SUPABASE_DB_URL: EMPTY"
+          test -n "${SUPABASE_POOL_URL:-}" && echo "SUPABASE_POOL_URL: SET" || echo "SUPABASE_POOL_URL: EMPTY"
 
       - name: Choose DB URL (direct or pool) + handshake
         id: pickdb
@@ -99,10 +125,12 @@ jobs:
           fi
           echo "Detected ID_COL=$ID_COL"
 
-          # Build generated SQL from template
+          # Template must exist in repo
           if [ ! -f sql/leaderboard_views.template.sql ]; then
             echo "Missing sql/leaderboard_views.template.sql"; exit 1
           fi
+
+          # Generate concrete SQL
           sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
           echo "Generated sql/_gen_leaderboard_views.sql"
 
