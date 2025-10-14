@@ -15,6 +15,13 @@ const SB_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const INAT    = process.env.INAT_BASE || "https://api.inaturalist.org/v1";
 const RPS     = Number(process.env.RATE_LIMIT_RPS || 1);
 const EXT_D   = Number(process.env.TEST_EXTEND_DAYS || 0);
+const SB_URL = process.env.SUPABASE_URL ?? "";
+const SB_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+console.log("SB_URL set?", Boolean(SB_URL), "SB_KEY set?", Boolean(SB_KEY));
+if (!SB_URL || !SB_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.");
+}
+
 
 // Multiple IDs (preferred) or single ID for backward-compat
 const IDS_RAW = (process.env.ASSIGNMENT_IDS || process.env.ASSIGNMENT_ID || "").trim();
