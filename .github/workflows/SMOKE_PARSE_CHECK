@@ -1,0 +1,8 @@
+# .github/workflows/SMOKE_PARSE_CHECK.yml
+name: SMOKE_PARSE_CHECK
+on: workflow_dispatch
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo yaml ok
