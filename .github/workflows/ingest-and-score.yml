@@ -7,7 +7,7 @@ on:
   push:
     paths:
       - .github/workflows/ingest-and-score.yml
-      - scripts/**
+      - ingest.mjs
       - sql/**
 
 permissions:
@@ -21,8 +21,8 @@ jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
     env:
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # Postgres URI (5432) with ?sslmode=require
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}  # optional pooler (6543)
       INAT_APP_ID: ${{ secrets.INAT_APP_ID }}
       INAT_APP_SECRET: ${{ secrets.INAT_APP_SECRET }}
       INAT_USERNAME: ${{ secrets.INAT_USERNAME }}
@@ -48,12 +48,10 @@ jobs:
       - name: Run iNat ingestion script
         run: |
           set -euo pipefail
-          if [ -f scripts/ingest_inat.mjs ]; then
-            node scripts/ingest_inat.mjs
-          elif [ -f scripts/ingest_inat.js ]; then
-            node scripts/ingest_inat.js
+          if [ -f ingest.mjs ]; then
+            node ingest.mjs
           else
-            echo "Ingest script not found (scripts/ingest_inat.mjs|.js). Skipping ingest step."
+            echo "ingest.mjs not found; skipping ingest."
           fi
 
       - name: Install psql client
@@ -82,12 +80,13 @@ jobs:
             fi
           fi
           echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
-          echo "Handshake OK on selected URL."
+          echo "Handshake OK."
 
       - name: Generate SQL with correct id column
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
+          # Detect the id column in public.daily_scores
           ID_COL=$(psql -4 "$USE_URL" -Atc "
             select column_name
             from information_schema.columns
@@ -99,6 +98,8 @@ jobs:
             echo 'Could not detect id column in public.daily_scores'; exit 1
           fi
           echo "Detected ID_COL=$ID_COL"
+
+          # Build generated SQL from template
           if [ ! -f sql/leaderboard_views.template.sql ]; then
             echo "Missing sql/leaderboard_views.template.sql"; exit 1
           fi
