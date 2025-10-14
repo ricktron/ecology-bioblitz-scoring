@@ -1,45 +1,121 @@
 name: Ingest iNat and Score
 
 on:
-  schedule:
-    - cron: "0 * * * *"     # hourly; adjust as you like
   workflow_dispatch:
+  schedule:
+    - cron: "*/30 * * * *"    # every 30 min; tune as you like
   push:
     paths:
-      - ".github/workflows/ingest-and-score.yml"
-      - "scripts/**"
-      - "sql/**"
+      - .github/workflows/injest_and_score.yml
+      - scripts/**
+      - sql/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ingest-and-score
+  cancel-in-progress: true
 
 jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
     env:
-      DB_URL: ${{ secrets.SUPABASE_DB_URL }}  # e.g. postgres://USER:PASSWORD@HOST:PORT/DB
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # REQUIRED
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # Postgres URI with ?sslmode=require
+      # OPTIONAL fallback (Connection Pooling psql URI, port 6543)
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
+
+      # iNaturalist creds (use what your ingest script expects)
       INAT_APP_ID: ${{ secrets.INAT_APP_ID }}
       INAT_APP_SECRET: ${{ secrets.INAT_APP_SECRET }}
       INAT_USERNAME: ${{ secrets.INAT_USERNAME }}
       INAT_PASSWORD: ${{ secrets.INAT_PASSWORD }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # If you use Node for ingestion
-      - uses: actions/setup-node@v4
+      # If your ingest script is Node. If it's Python, swap these two steps for setup-python + pip install.
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
       - name: Install deps (ok if none)
-        run: npm ci || echo "no package.json; skipping npm ci"
+        run: |
+          set -e
+          if [ -f package-lock.json ]; then npm ci
+          elif [ -f package.json ]; then npm i
+          else echo "No package.json found; skipping"
+          fi
 
       - name: Run iNat ingestion script
-        run: node scripts/ingest_inat_and_score.mjs || echo "no ingest script yet; skipping"
+        run: |
+          set -euo pipefail
+          # Adjust to your real script (examples shown)
+          if [ -f scripts/ingest_inat.mjs ]; then
+            node scripts/ingest_inat.mjs
+          elif [ -f scripts/ingest_inat.js ]; then
+            node scripts/ingest_inat.js
+          else
+            echo "Ingest script not found (scripts/ingest_inat.mjs|.js). Skipping ingest step."
+          fi
 
       - name: Install psql client
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
+      - name: Generate SQL with correct id column
+        run: |
+          set -euo pipefail
+          # Prefer direct DB URL; fall back to pool if needed
+          USE_URL="${SUPABASE_DB_URL:-}"
+
+          if [ -n "$USE_URL" ]; then
+            if ! psql -4 "$USE_URL" -Atc "select 1" >/dev/null 2>&1; then
+              if [ -n "${SUPABASE_POOL_URL:-}" ] && psql -4 "$SUPABASE_POOL_URL" -Atc "select 1" >/dev/null 2>&1; then
+                USE_URL="$SUPABASE_POOL_URL"
+              else
+                echo "DB handshake failed. Check SUPABASE_DB_URL or SUPABASE_POOL_URL secrets."; exit 1
+              fi
+            fi
+          else
+            if [ -n "${SUPABASE_POOL_URL:-}" ]; then
+              USE_URL="$SUPABASE_POOL_URL"
+            else
+              echo "No DB URL secret set."; exit 1
+            fi
+          fi
+
+          echo "$USE_URL" > /tmp/dburl
+
+          # Detect the id column in public.daily_scores
+          ID_COL=$(psql -4 "$(cat /tmp/dburl)" -Atc "
+            select column_name
+            from information_schema.columns
+            where table_schema='public'
+              and table_name='daily_scores'
+              and column_name in ('student_id','roster_id','person_id')
+            limit 1;")
+          if [ -z "$ID_COL" ]; then
+            echo 'Could not detect id column in public.daily_scores'; exit 1
+          fi
+          echo "Detected ID_COL=$ID_COL"
+
+          # Build generated SQL from template
+          mkdir -p sql
+          if [ ! -f sql/leaderboard_views.template.sql ]; then
+            echo "Missing sql/leaderboard_views.template.sql"; exit 1
+          fi
+          sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
+          echo "Generated sql/_gen_leaderboard_views.sql"
+
       - name: Apply / update views (idempotent)
-        run: psql "$DB_URL" -v ON_ERROR_STOP=1 -f sql/setup_leaderboard_views.sql
+        run: |
+          set -euo pipefail
+          USE_URL=$(cat /tmp/dburl)
+          echo "Handshake:"
+          psql -4 "$USE_URL" -Atc "select current_user, current_database(), inet_server_addr(), inet_client_addr(), version();"
+          psql -4 "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
