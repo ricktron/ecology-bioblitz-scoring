@@ -1,8 +1,8 @@
-name: Ingest iNat and Score • vENVDEBUG2
+name: Ingest iNat and Score • vENVDEBUG3
 
 on:
   workflow_dispatch:
-  # comment this out while debugging to reduce noise:
+  # While debugging you can comment out the schedule below to reduce noise
   schedule:
     - cron: "*/30 * * * *"
   push:
@@ -26,18 +26,18 @@ jobs:
       # HTTP API (what the script needs)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # also provide the aliases your script might read:
+      # Also provide aliases your script might read:
       SB_URL: ${{ secrets.SUPABASE_URL }}
       SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # iNat / runtime knobs
+      # iNat / runtime knobs (if used by your script)
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
 
-      # Postgres (for psql)
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # 5432 URI with ?sslmode=require
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}  # optional 6543 pooler URI
+      # Postgres (for psql steps later)
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
     steps:
       - name: Checkout
@@ -75,7 +75,7 @@ jobs:
       # ---- INGEST ----
       - name: Run iNat ingestion script
         env:
-          # belt + suspenders: pass both naming styles explicitly again
+          # Explicit again for this step
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SB_URL: ${{ secrets.SUPABASE_URL }}
