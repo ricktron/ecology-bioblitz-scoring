@@ -21,8 +21,8 @@ jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
     env:
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # Postgres URI (port 5432) with ?sslmode=require
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}  # Optional pooling URI (port 6543)
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
       INAT_APP_ID: ${{ secrets.INAT_APP_ID }}
       INAT_APP_SECRET: ${{ secrets.INAT_APP_SECRET }}
       INAT_USERNAME: ${{ secrets.INAT_USERNAME }}
@@ -88,7 +88,6 @@ jobs:
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          # Detect the id column in public.daily_scores
           ID_COL=$(psql -4 "$USE_URL" -Atc "
             select column_name
             from information_schema.columns
@@ -100,7 +99,6 @@ jobs:
             echo 'Could not detect id column in public.daily_scores'; exit 1
           fi
           echo "Detected ID_COL=$ID_COL"
-          # Build generated SQL from template
           if [ ! -f sql/leaderboard_views.template.sql ]; then
             echo "Missing sql/leaderboard_views.template.sql"; exit 1
           fi
