@@ -1,10 +1,10 @@
-name: Ingest iNat and Score • vENVDEBUG3
+name: Ingest iNat and Score • vENVDEBUG4
 
 on:
   workflow_dispatch:
-  # While debugging you can comment the schedule out to reduce noise
-  schedule:
-    - cron: "*/30 * * * *"
+  # While debugging, you can comment out the schedule below to reduce noise:
+  # schedule:
+  #   - cron: "*/30 * * * *"
   push:
     paths:
       - .github/workflows/ingest-and-score.yml
@@ -23,21 +23,21 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # HTTP API for the script
+      # Supabase HTTP API (used by ingest.mjs) – set as Actions secrets
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # aliases some scripts expect
+      # Aliases your script originally checked:
       SB_URL: ${{ secrets.SUPABASE_URL }}
       SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # iNat / runtime knobs (if used)
+      # iNat knobs (if your script uses them)
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
 
-      # DB for psql steps
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
+      # Postgres (for psql)
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # 5432 URI with ?sslmode=require
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}  # 6543 URI with ?sslmode=require
 
     steps:
       - name: Checkout
@@ -56,14 +56,13 @@ jobs:
           else echo "No package.json found; skipping"
           fi
 
-      # ---- DEBUG (shell + node) ----
-      - name: "Debug (shell): API secrets presence"
+      - name: Debug (shell): API secrets presence
         run: |
           for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: "Debug (node): does Node see the env?"
+      - name: Debug (node): does Node see the env?
         run: |
           node -e "console.log({
             SUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -72,7 +71,6 @@ jobs:
             SB_KEY: !!process.env.SB_KEY
           })"
 
-      # ---- INGEST ----
       - name: Run iNat ingestion script
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -86,43 +84,52 @@ jobs:
           set -euo pipefail
           node ingest.mjs
 
-      # ---- SQL / views ----
       - name: Install psql client
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: "Debug (shell): DB secrets presence"
+      - name: Debug (shell): DB secrets presence
         run: |
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-- name: Choose DB URL and handshake
-  id: pickdb
-  run: |
-    set -euo pipefail
-    try() {
-      url="$1"
-      host=$(printf '%s' "$url" | sed -E 's@.*://[^@]*@//REDACTED@; s@^.*@&@')
-      echo "Trying connection to: $host"
-      # Show connection info and run a trivial query; verbose to surface error cause
-      psql -4 "$url" -v VERBOSITY=verbose -c "\conninfo"
-      psql -4 "$url" -Atc "select 1"
-    }
-    if [ -n "${SUPABASE_DB_URL:-}" ] && try "$SUPABASE_DB_URL"; then
-      USE_URL="$SUPABASE_DB_URL"
-    elif [ -n "${SUPABASE_POOL_URL:-}" ] && try "$SUPABASE_POOL_URL"; then
-      USE_URL="$SUPABASE_POOL_URL"
-    else
-      echo "DB handshake failed. Re-check SUPABASE_DB_URL and SUPABASE_POOL_URL:"
-      echo "• Use 'postgres' user and your **database password**."
-      echo "• Include '?sslmode=require'."
-      echo "• If password has special chars, URL-encode or use a simpler password."
-      exit 1
-    fi
-    echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
-    echo "Handshake OK."
+      - name: Choose DB URL and handshake
+        id: pickdb
+        shell: bash
+        run: |
+          set -euo pipefail
+          USE_URL=""
+
+          if [ -n "${SUPABASE_DB_URL:-}" ]; then
+            echo "Trying direct URI (5432)…"
+            if psql -4 "$SUPABASE_DB_URL" -Atc "select 1" >/dev/null 2>&1; then
+              USE_URL="$SUPABASE_DB_URL"
+            else
+              echo "Direct URI failed."
+            fi
+          fi
+
+          if [ -z "$USE_URL" ] && [ -n "${SUPABASE_POOL_URL:-}" ]; then
+            echo "Trying pooler URI (6543)…"
+            if psql -4 "$SUPABASE_POOL_URL" -Atc "select 1" >/dev/null 2>&1; then
+              USE_URL="$SUPABASE_POOL_URL"
+            else
+              echo "Pooler URI failed."
+            fi
+          fi
+
+          if [ -z "$USE_URL" ]; then
+            echo "DB handshake failed. Check SUPABASE_DB_URL and/or SUPABASE_POOL_URL."
+            echo "• Use postgres user + your **database password** (not API key)."
+            echo "• Include '?sslmode=require'."
+            echo "• If the password has special chars (@:/?#&+%), URL-encode it or reset to a simple one."
+            exit 1
+          fi
+
+          echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
+          echo "Handshake OK."
 
       - name: Generate SQL with correct id column
         run: |
