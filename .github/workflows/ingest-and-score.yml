@@ -3,7 +3,7 @@ name: Ingest iNat and Score
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"   # every 30 min
+    - cron: "*/30 * * * *"
   push:
     paths:
       - .github/workflows/ingest-and-score.yml
@@ -21,20 +21,17 @@ jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
 
-    # Make required secrets available to all steps
     env:
-      # Supabase HTTP API (for your ingest.mjs)
+      # HTTP API (for ingest.mjs)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # iNat + run-time knobs your script expects
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
 
-      # Postgres (for psql steps below)
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}        # direct connection (5432) with ?sslmode=require
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}    # optional pooler (6543) as fallback
+      # Postgres (for psql)
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
     steps:
       - name: Checkout
@@ -53,7 +50,7 @@ jobs:
           else echo "No package.json found; skipping"
           fi
 
-      # Helpful: verify API secrets are present (masked in logs)
+      # ---- DEBUG so we can see if the env is visible to this job ----
       - name: Debug: API secrets presence (masked)
         run: |
           test -n "${SUPABASE_URL:-}" && echo "SUPABASE_URL: SET" || echo "SUPABASE_URL: EMPTY"
@@ -62,9 +59,9 @@ jobs:
           test -n "${ASSIGNMENT_IDS:-}" && echo "ASSIGNMENT_IDS: SET" || echo "ASSIGNMENT_IDS: EMPTY"
           test -n "${RATE_LIMIT_RPS:-}" && echo "RATE_LIMIT_RPS: SET" || echo "RATE_LIMIT_RPS: EMPTY"
 
+      # ---- INGEST (explicit env for this step too) ----
       - name: Run iNat ingestion script
         env:
-          # (Redundant but explicit for this step)
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           INAT_BASE: ${{ secrets.INAT_BASE }}
@@ -79,7 +76,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      # Optional: verify DB secrets are present
       - name: Debug: DB secrets presence (masked)
         run: |
           test -n "${SUPABASE_DB_URL:-}" && echo "SUPABASE_DB_URL: SET" || echo "SUPABASE_DB_URL: EMPTY"
@@ -112,7 +108,6 @@ jobs:
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          # Detect the id column in public.daily_scores
           ID_COL=$(psql -4 "$USE_URL" -Atc "
             select column_name
             from information_schema.columns
@@ -124,13 +119,9 @@ jobs:
             echo 'Could not detect id column in public.daily_scores'; exit 1
           fi
           echo "Detected ID_COL=$ID_COL"
-
-          # Template must exist in repo
           if [ ! -f sql/leaderboard_views.template.sql ]; then
             echo "Missing sql/leaderboard_views.template.sql"; exit 1
           fi
-
-          # Generate concrete SQL
           sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
           echo "Generated sql/_gen_leaderboard_views.sql"
 
