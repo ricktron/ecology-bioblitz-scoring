@@ -81,21 +81,21 @@ jobs:
           DB1: ${{ secrets.SUPABASE_DB_URL }}
           DB2: ${{ secrets.SUPABASE_POOL_URL }}
         run: |
-          set -euo pipefail
-          use="$DB1"
-          if [ -n "$use" ]; then
-            echo "Trying direct (5432)"
-            psql -4 "$use" -v VERBOSITY=verbose -c "\conninfo"
-            psql -4 "$use" -Atc "select 1"
-          else
-            use="$DB2"
-            [ -n "$use" ] || { echo "No DB URL present."; exit 1; }
-            echo "Trying pooler (6543)"
-            psql -4 "$use" -v VERBOSITY=verbose -c "\conninfo"
-            psql -4 "$use" -Atc "select 1"
-          fi
-          echo "use_url=$use" >> "$GITHUB_OUTPUT"
-          echo "Handshake OK"
+  set -euo pipefail
+  use="$DB1"
+  if [ -n "$use" ]; then
+    echo "Trying direct (5432)"
+    psql "$use" -v VERBOSITY=verbose -c "\conninfo"
+    psql "$use" -Atc "select 1"
+  else
+    use="$DB2"
+    [ -n "$use" ] || { echo "No DB URL present."; exit 1; }
+    echo "Trying pooler (6543)"
+    psql "$use" -v VERBOSITY=verbose -c "\conninfo"
+    psql "$use" -Atc "select 1"
+  fi
+  echo "use_url=$use" >> "$GITHUB_OUTPUT"
+  echo "Handshake OK"
 
       - name: "Generate SQL with correct id column"
         run: |
