@@ -1,0 +1,14 @@
+insert into public.inat_obs_cache_v1
+  (obs_id, user_login, observed_at, latitude, longitude, taxon_id, ancestor_ids, quality_grade, is_captive)
+values
+  -- loop your fetched observations and bind values
+  -- (:id, :login, :observed_on, :lat, :lng, :taxon_id, :ancestors[], :quality, :captive)
+on conflict (obs_id) do update set
+  user_login    = excluded.user_login,
+  observed_at   = excluded.observed_at,
+  latitude      = excluded.latitude,
+  longitude     = excluded.longitude,
+  taxon_id      = excluded.taxon_id,
+  ancestor_ids  = excluded.ancestor_ids,
+  quality_grade = excluded.quality_grade,
+  is_captive    = excluded.is_captive;
