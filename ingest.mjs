@@ -10,6 +10,17 @@
 // ---------------------------------------------------------------------
 
 // ---- Config / helpers ------------------------------------------------
+// Env shim: accept either SUPABASE_* or SB_* names
+const SB_URL  = process.env.SB_URL  || process.env.SUPABASE_URL  || "";
+const SB_KEY  = process.env.SB_KEY  || process.env.SUPABASE_SERVICE_ROLE_KEY || "";
+
+// Helpful debug (prints booleans only)
+console.log("env seen -> SB_URL:", !!SB_URL, "SB_KEY:", !!SB_KEY);
+
+if (!SB_URL || !SB_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY.");
+}
+
 const SB_URL  = process.env.SUPABASE_URL;
 const SB_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const INAT    = process.env.INAT_BASE || "https://api.inaturalist.org/v1";
