@@ -57,13 +57,13 @@ jobs:
           fi
 
       # ---- DEBUG (shell + node) ----
-      - name: Debug shell - API env presence
+      - name: "Debug (shell): API secrets presence"
         run: |
           for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: Debug node - sees env?
+      - name: "Debug (node): does Node see the env?"
         run: |
           node -e "console.log({
             SUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -92,7 +92,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Debug shell - DB env presence
+      - name: "Debug (shell): DB secrets presence"
         run: |
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
