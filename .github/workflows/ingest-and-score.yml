@@ -1,4 +1,4 @@
-name: "Ingest iNat and Score • vENVDEBUG7"
+name: "Ingest iNat and Score • vENVDEBUG8"
 
 on: { workflow_dispatch: {} }
 
@@ -39,14 +39,14 @@ jobs:
         with:
           node-version: "20"
 
-      - name: "Debug (shell) — API secrets presence"
+      - name: "Debug (shell) - API secrets presence"
         run: |
           set -e
           for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: "Debug (node) — env booleans"
+      - name: "Debug (node) - env booleans"
         run: |
           node -e "const b=v=>!!process.env[v];console.log({SUPABASE_URL:b('SUPABASE_URL'),SUPABASE_SERVICE_ROLE_KEY:b('SUPABASE_SERVICE_ROLE_KEY'),SB_URL:b('SB_URL'),SB_KEY:b('SB_KEY')})"
 
@@ -68,7 +68,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: "Debug (shell) — DB secrets presence"
+      - name: "Debug (shell) - DB secrets presence"
         run: |
           set -e
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
@@ -81,27 +81,27 @@ jobs:
           DB1: ${{ secrets.SUPABASE_DB_URL }}
           DB2: ${{ secrets.SUPABASE_POOL_URL }}
         run: |
-  set -euo pipefail
-  use="$DB1"
-  if [ -n "$use" ]; then
-    echo "Trying direct (5432)"
-    psql "$use" -v VERBOSITY=verbose -c "\conninfo"
-    psql "$use" -Atc "select 1"
-  else
-    use="$DB2"
-    [ -n "$use" ] || { echo "No DB URL present."; exit 1; }
-    echo "Trying pooler (6543)"
-    psql "$use" -v VERBOSITY=verbose -c "\conninfo"
-    psql "$use" -Atc "select 1"
-  fi
-  echo "use_url=$use" >> "$GITHUB_OUTPUT"
-  echo "Handshake OK"
+          set -euo pipefail
+          use="$DB1"
+          if [ -n "$use" ]; then
+            echo "Trying direct (5432)"
+            psql "$use" -v VERBOSITY=verbose -c "\conninfo"
+            psql "$use" -Atc "select 1"
+          else
+            use="$DB2"
+            [ -n "$use" ] || { echo "No DB URL present."; exit 1; }
+            echo "Trying pooler (6543)"
+            psql "$use" -v VERBOSITY=verbose -c "\conninfo"
+            psql "$use" -Atc "select 1"
+          fi
+          echo "use_url=$use" >> "$GITHUB_OUTPUT"
+          echo "Handshake OK"
 
       - name: "Generate SQL with correct id column"
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          ID_COL=$(psql -4 "$USE_URL" -Atc "
+          ID_COL=$(psql "$USE_URL" -Atc "
             select column_name
             from information_schema.columns
             where table_schema='public'
@@ -118,4 +118,4 @@ jobs:
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          psql -4 "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
+          psql "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
