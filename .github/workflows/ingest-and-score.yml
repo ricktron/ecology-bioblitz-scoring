@@ -21,17 +21,20 @@ jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
 
+    # Secrets used across steps
     env:
-      # HTTP API (your ingest.mjs uses these)
+      # Supabase HTTP API (used by ingest.mjs)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # iNat / runtime knobs (if your script uses them)
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
 
-      # Postgres (for psql steps)
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
+      # Postgres for psql (views)
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}      # direct 5432 URI with ?sslmode=require
+      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}  # optional pooler 6543 URI
 
     steps:
       - name: Checkout
@@ -50,7 +53,7 @@ jobs:
           else echo "No package.json found; skipping"
           fi
 
-      # --- Make envs unambiguously available to later shells (and Node) ---
+      # --- Make envs explicit for all later shells (also helps if a step overrides env) ---
       - name: Export API env (explicit)
         run: |
           echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> "$GITHUB_ENV"
@@ -59,8 +62,8 @@ jobs:
           echo "ASSIGNMENT_IDS=${{ secrets.ASSIGNMENT_IDS }}" >> "$GITHUB_ENV"
           echo "RATE_LIMIT_RPS=${{ secrets.RATE_LIMIT_RPS }}" >> "$GITHUB_ENV"
 
-      # --- Sanity: show which ones are present (masked) ---
-      - name: Debug: API secrets presence (masked)
+      # --- Shell-level confirmation (masked) ---
+      - name: Debug (shell): API secrets presence
         run: |
           test -n "${SUPABASE_URL:-}" && echo "SUPABASE_URL: SET" || echo "SUPABASE_URL: EMPTY"
           test -n "${SUPABASE_SERVICE_ROLE_KEY:-}" && echo "SUPABASE_SERVICE_ROLE_KEY: SET" || echo "SUPABASE_SERVICE_ROLE_KEY: EMPTY"
@@ -68,17 +71,31 @@ jobs:
           test -n "${ASSIGNMENT_IDS:-}" && echo "ASSIGNMENT_IDS: SET" || echo "ASSIGNMENT_IDS: EMPTY"
           test -n "${RATE_LIMIT_RPS:-}" && echo "RATE_LIMIT_RPS: SET" || echo "RATE_LIMIT_RPS: EMPTY"
 
+      # --- Node-level confirmation (booleans only) ---
+      - name: Debug (node): does Node see the env?
+        run: |
+          node -e "console.log('Node sees SUPABASE_URL?', !!process.env.SUPABASE_URL, 'SUPABASE_SERVICE_ROLE_KEY?', !!process.env.SUPABASE_SERVICE_ROLE_KEY)"
+
+      # --- Ingest ---
       - name: Run iNat ingestion script
+        env:
+          # Re-declare explicitly for this step too (belt & suspenders)
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INAT_BASE: ${{ secrets.INAT_BASE }}
+          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
         run: |
           set -euo pipefail
           node ingest.mjs
 
+      # --- SQL/views deployment ---
       - name: Install psql client
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Debug: DB secrets presence (masked)
+      - name: Debug (shell): DB secrets presence
         run: |
           test -n "${SUPABASE_DB_URL:-}" && echo "SUPABASE_DB_URL: SET" || echo "SUPABASE_DB_URL: EMPTY"
           test -n "${SUPABASE_POOL_URL:-}" && echo "SUPABASE_POOL_URL: SET" || echo "SUPABASE_POOL_URL: EMPTY"
@@ -121,7 +138,6 @@ jobs:
             echo 'Could not detect id column in public.daily_scores'; exit 1
           fi
           echo "Detected ID_COL=$ID_COL"
-
           if [ ! -f sql/leaderboard_views.template.sql ]; then
             echo "Missing sql/leaderboard_views.template.sql"; exit 1
           fi
