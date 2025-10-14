@@ -1,15 +1,7 @@
 name: Ingest iNat and Score • vENVDEBUG4
 
 on:
-  workflow_dispatch:
-  # While debugging, you can comment out the schedule below to reduce noise:
-  # schedule:
-  #   - cron: "*/30 * * * *"
-  push:
-    paths:
-      - .github/workflows/ingest-and-score.yml
-      - ingest.mjs
-      - sql/**
+  workflow_dispatch:   # manual runs while we debug
 
 permissions:
   contents: read
@@ -23,14 +15,14 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Supabase HTTP API (used by ingest.mjs) – set as Actions secrets
+      # Supabase HTTP API (for ingest.mjs)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # Aliases your script originally checked:
+      # Aliases your script may read
       SB_URL: ${{ secrets.SUPABASE_URL }}
       SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # iNat knobs (if your script uses them)
+      # iNat / runtime knobs (ok if unset)
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
@@ -48,16 +40,9 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install deps (ok if none)
-        run: |
-          set -e
-          if [ -f package-lock.json ]; then npm ci
-          elif [ -f package.json ]; then npm i
-          else echo "No package.json found; skipping"
-          fi
-
       - name: Debug (shell): API secrets presence
         run: |
+          set -e
           for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
@@ -91,43 +76,31 @@ jobs:
 
       - name: Debug (shell): DB secrets presence
         run: |
+          set -e
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
       - name: Choose DB URL and handshake
         id: pickdb
-        shell: bash
         run: |
           set -euo pipefail
-          USE_URL=""
-
-          if [ -n "${SUPABASE_DB_URL:-}" ]; then
-            echo "Trying direct URI (5432)…"
-            if psql -4 "$SUPABASE_DB_URL" -Atc "select 1" >/dev/null 2>&1; then
-              USE_URL="$SUPABASE_DB_URL"
-            else
-              echo "Direct URI failed."
-            fi
-          fi
-
-          if [ -z "$USE_URL" ] && [ -n "${SUPABASE_POOL_URL:-}" ]; then
-            echo "Trying pooler URI (6543)…"
-            if psql -4 "$SUPABASE_POOL_URL" -Atc "select 1" >/dev/null 2>&1; then
-              USE_URL="$SUPABASE_POOL_URL"
-            else
-              echo "Pooler URI failed."
-            fi
-          fi
-
-          if [ -z "$USE_URL" ]; then
-            echo "DB handshake failed. Check SUPABASE_DB_URL and/or SUPABASE_POOL_URL."
-            echo "• Use postgres user + your **database password** (not API key)."
-            echo "• Include '?sslmode=require'."
-            echo "• If the password has special chars (@:/?#&+%), URL-encode it or reset to a simple one."
+          try() {
+            url="$1"
+            host_redacted=$(printf '%s' "$url" | sed -E 's@//[^:@/]*:.*@//REDACTED@')
+            echo "Trying: $host_redacted"
+            psql -4 "$url" -v VERBOSITY=verbose -c "\conninfo"
+            psql -4 "$url" -Atc "select 1"
+          }
+          if [ -n "${SUPABASE_DB_URL:-}" ] && try "$SUPABASE_DB_URL"; then
+            USE_URL="$SUPABASE_DB_URL"
+          elif [ -n "${SUPABASE_POOL_URL:-}" ] && try "$SUPABASE_POOL_URL"; then
+            USE_URL="$SUPABASE_POOL_URL"
+          else
+            echo "DB handshake failed. Check SUPABASE_DB_URL or SUPABASE_POOL_URL."
+            echo "Tip: reset DB password in Supabase and either URL-encode special chars or use a simple password."
             exit 1
           fi
-
           echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
           echo "Handshake OK."
 
@@ -145,17 +118,11 @@ jobs:
           if [ -z "$ID_COL" ]; then
             echo 'Could not detect id column in public.daily_scores'; exit 1
           fi
-          echo "Detected ID_COL=$ID_COL"
-          if [ ! -f sql/leaderboard_views.template.sql ]; then
-            echo "Missing sql/leaderboard_views.template.sql"; exit 1
-          fi
           sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
-          echo "Generated sql/_gen_leaderboard_views.sql"
+          echo "Detected ID_COL=$ID_COL and generated sql/_gen_leaderboard_views.sql"
 
       - name: Apply / update views (idempotent)
         run: |
           set -euo pipefail
           USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          echo "Handshake details:"
-          psql -4 "$USE_URL" -Atc "select current_user, current_database(), inet_server_addr(), inet_client_addr(), version();"
           psql -4 "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
