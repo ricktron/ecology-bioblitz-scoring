@@ -2,7 +2,7 @@ name: Ingest iNat and Score • vENVDEBUG3
 
 on:
   workflow_dispatch:
-  # While debugging you can comment out the schedule below to reduce noise
+  # While debugging you can comment the schedule out to reduce noise
   schedule:
     - cron: "*/30 * * * *"
   push:
@@ -23,19 +23,19 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # HTTP API (what the script needs)
+      # HTTP API for the script
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # Also provide aliases your script might read:
+      # aliases some scripts expect
       SB_URL: ${{ secrets.SUPABASE_URL }}
       SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # iNat / runtime knobs (if used by your script)
+      # iNat / runtime knobs (if used)
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
 
-      # Postgres (for psql steps later)
+      # DB for psql steps
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
@@ -57,13 +57,13 @@ jobs:
           fi
 
       # ---- DEBUG (shell + node) ----
-      - name: Debug (shell): API secrets presence
+      - name: Debug shell - API env presence
         run: |
           for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: Debug (node): does Node see the env?
+      - name: Debug node - sees env?
         run: |
           node -e "console.log({
             SUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -75,7 +75,6 @@ jobs:
       # ---- INGEST ----
       - name: Run iNat ingestion script
         env:
-          # Explicit again for this step
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SB_URL: ${{ secrets.SUPABASE_URL }}
@@ -87,19 +86,19 @@ jobs:
           set -euo pipefail
           node ingest.mjs
 
-      # ---- SQL/views deployment ----
+      # ---- SQL / views ----
       - name: Install psql client
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      - name: Debug (shell): DB secrets presence
+      - name: Debug shell - DB env presence
         run: |
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
           done
 
-      - name: Choose DB URL (direct or pool) + handshake
+      - name: Choose DB URL and handshake
         id: pickdb
         run: |
           set -euo pipefail
@@ -109,7 +108,7 @@ jobs:
               if [ -n "${SUPABASE_POOL_URL:-}" ] && psql -4 "$SUPABASE_POOL_URL" -Atc "select 1" >/dev/null 2>&1; then
                 USE_URL="$SUPABASE_POOL_URL"
               else
-                echo "DB handshake failed. Check SUPABASE_DB_URL or SUPABASE_POOL_URL secrets."; exit 1
+                echo "DB handshake failed. Check SUPABASE_DB_URL or SUPABASE_POOL_URL."; exit 1
               fi
             fi
           else
