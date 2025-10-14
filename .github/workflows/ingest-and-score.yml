@@ -1,4 +1,4 @@
-name: Ingest iNat and Score v6
+name: Ingest iNat and Score (ipv4 pooler)
 
 on:
   workflow_dispatch:
@@ -22,8 +22,11 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # HTTP API (ingest.mjs)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # iNat knobs
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
@@ -37,20 +40,28 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install deps (ok if none)
+        shell: bash
+        run: |
+          set -e
+          if [ -f package-lock.json ]; then npm ci
+          elif [ -f package.json ]; then npm i
+          else echo "No package.json found; skipping"
+          fi
+
       - name: Run iNat ingestion script
         shell: bash
         run: |
           set -euo pipefail
           node ingest.mjs
 
-      - name: Install psql client and dnsutils
+      - name: Install psql client
         shell: bash
         run: |
-          set -e
           sudo apt-get update -y
           sudo apt-get install -y postgresql-client dnsutils
 
-      - name: Debug shell DB secrets presence
+      - name: Debug (shell) - DB secrets presence
         shell: bash
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
@@ -61,16 +72,16 @@ jobs:
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: (missing)"; fi
           done
 
-      - name: Choose DB URL and handshake (IPv4)
+      - name: Choose DB URL and handshake (ipv4, verbose)
         id: pickdb
         shell: bash
         env:
           DB_URL_DIRECT: ${{ secrets.SUPABASE_DB_URL }}
-          DB_URL_POOL:   ${{ secrets.SUPABASE_POOL_URL }}
+          DB_URL_POOL: ${{ secrets.SUPABASE_POOL_URL }}
         run: |
           set -euo pipefail
 
-          parse_url () {
+          parse_with_python () {
             python3 - "$1" <<'PY'
 import sys, urllib.parse as U
 u = U.urlparse(sys.argv[1])
@@ -78,66 +89,74 @@ print(u.username or '')
 print(u.password or '')
 print(u.hostname or '')
 print(str(u.port or 5432))
-print((u.path or '/').lstrip('/').split('/')[0])
-print(('?' in sys.argv[1]) and '&' or '?')
+path = (u.path or '/').lstrip('/')
+print(path.split('/')[0])
 PY
           }
 
-          try_one () {
-            local url="$1" label="$2"
-            if [ -z "$url" ]; then
-              echo "::warning::Empty URL for $label"
+          try_ipv4 () {
+            url="$1"; label="$2"
+            echo "::group::Handshake: $label"
+            if [ -z "${url:-}" ]; then
+              echo "::warning::URL is empty for $label"
+              echo "::endgroup::"
               return 1
             fi
 
-            read -r UUSER UPASS UHOST UPORT UDB QJOIN < <(parse_url "$url")
+            read -r URL_USER URL_PASS URL_HOST URL_PORT URL_DB < <(parse_with_python "$url")
 
-            echo "::group::Handshake $label"
-            echo "Host : $UHOST"
-            echo "Port : $UPORT"
-            echo "DB   : $UDB"
-            echo "User : $UUSER"
+            echo "Host      : $URL_HOST"
+            echo "Port      : $URL_PORT"
+            echo "DB        : $URL_DB"
+            echo "User      : $URL_USER"
+            echo "PGSSLMODE : require"
 
-            IPv4="$(dig +short A "$UHOST" | head -1 || true)"
+            IPv4="$(dig +short A "$URL_HOST" | head -1 || true)"
             if [ -z "$IPv4" ]; then
-              echo "::warning::No IPv4 A record for $UHOST"
+              echo "::warning::No IPv4 A record for $URL_HOST"
               echo "::endgroup::"
               return 1
             fi
-            echo "IPv4 : $IPv4"
+            echo "IPv4      : $IPv4"
 
-            if ! timeout 5 bash -c ">/dev/tcp/$IPv4/$UPORT" 2>/dev/null; then
-              echo "::warning::TCP to $IPv4:$UPORT failed"
+            if timeout 5 bash -c ">/dev/tcp/$IPv4/$URL_PORT" 2>/dev/null; then
+              echo "TCP check : OK"
+            else
+              echo "::warning::TCP to $IPv4:$URL_PORT failed"
               echo "::endgroup::"
               return 1
             fi
 
-            export PGPASSWORD="$UPASS" PGSSLMODE=require
-            DSN="hostaddr=$IPv4 host=$UHOST port=$UPORT dbname=$UDB user=$UUSER sslmode=require"
+            export PGPASSWORD="$URL_PASS" PGSSLMODE=require
+            DSN="hostaddr=$IPv4 host=$URL_HOST port=$URL_PORT dbname=$URL_DB user=$URL_USER sslmode=require"
 
-            if psql "$DSN" -v VERBOSITY=verbose -Atc "select 1" >/dev/null; then
-              echo "use_url=${url}${QJOIN}hostaddr=${IPv4}" >> "$GITHUB_OUTPUT"
+            if psql "$DSN" -v VERBOSITY=verbose -Atc "select 1"; then
+              echo "psql      : OK"
               echo "::endgroup::"
               return 0
+            else
+              echo "::warning::psql failed for $label"
+              echo "::endgroup::"
+              return 1
             fi
-
-            echo "::warning::psql failed for $label"
-            echo "::endgroup::"
-            return 1
           }
 
-          if try_one "${DB_URL_POOL:-}" "Pooler 6543"; then
-            :
-          elif try_one "${DB_URL_DIRECT:-}" "Direct 5432"; then
-            :
+          USE_URL=""
+          if [ -n "${DB_URL_POOL:-}" ] && try_ipv4 "$DB_URL_POOL" "Pooler 6543"; then
+            USE_URL="$DB_URL_POOL"
+          elif [ -n "${DB_URL_DIRECT:-}" ] && try_ipv4 "$DB_URL_DIRECT" "Direct 5432"; then
+            USE_URL="$DB_URL_DIRECT"
           else
             echo "::error title=DB handshake::Could not reach either DB URL from GitHub Actions."
             echo "Hints:"
-            echo "  - Secrets must be full Supabase URIs ending with ?sslmode=require"
-            echo "  - Project must be running and ref/region correct"
-            echo "  - Network Restrictions open or include GitHub egress"
+            echo "  - Verify both secrets are Supabase URIs ending with ?sslmode=require"
+            echo "  - Supabase project running (not paused) and region/name correct"
+            echo "  - Network Restrictions are open (or include GitHub egress)"
             exit 2
           fi
+
+          echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
+          echo "USE_URL=$USE_URL" >> "$GITHUB_ENV"
 
       - name: Generate SQL with correct id column
         id: gensql
@@ -146,18 +165,18 @@ PY
           USE_URL: ${{ steps.pickdb.outputs.use_url }}
         run: |
           set -euo pipefail
-          check_col () { psql "$USE_URL" -Atc \
-            "select 1 from information_schema.columns where table_schema='public' and table_name='daily_scores' and column_name='$1'" | grep -q 1; }
+          check_col () { psql "$USE_URL" -Atc "select 1 from information_schema.columns where table_schema='public' and table_name='daily_scores' and column_name='$1'" | grep -q 1; }
+
           if check_col student_id; then ID_COL=student_id
           elif check_col roster_id; then ID_COL=roster_id
           elif check_col person_id; then ID_COL=person_id
           else
-            echo "::error title=Missing id column::Need one of: student_id, roster_id, person_id"
+            echo "::error title=Missing id column::daily_scores must have one of: student_id, roster_id, person_id"
             exit 1
           fi
-          echo "Detected ID_COL=${ID_COL}"
-          sed -e "s/__ID_COL__/${ID_COL}/g" \
-            sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
+
+          echo "Detected ID_COL=$ID_COL"
+          sed -e "s/__ID_COL__/${ID_COL}/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
 
       - name: Apply or update views
         shell: bash
@@ -165,7 +184,7 @@ PY
           USE_URL: ${{ steps.pickdb.outputs.use_url }}
         run: |
           set -euo pipefail
-          echo "Handshake details:"
-          psql "$USE_URL" -Atc "select current_user, current_database(), inet_client_addr(), inet_server_addr()" || true
+          echo "Connection info:"
+          psql "$USE_URL" -Atc "select current_user, current_database(), inet_client_addr()"
           echo "Applying SQL..."
           psql "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
