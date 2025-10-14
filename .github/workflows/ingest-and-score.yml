@@ -22,14 +22,14 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # HTTP API (for ingest.mjs)
+      # HTTP API (your ingest.mjs uses these)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
 
-      # Postgres (for psql)
+      # Postgres (for psql steps)
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
@@ -50,7 +50,16 @@ jobs:
           else echo "No package.json found; skipping"
           fi
 
-      # ---- DEBUG so we can see if the env is visible to this job ----
+      # --- Make envs unambiguously available to later shells (and Node) ---
+      - name: Export API env (explicit)
+        run: |
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> "$GITHUB_ENV"
+          echo "SUPABASE_SERVICE_ROLE_KEY=${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> "$GITHUB_ENV"
+          echo "INAT_BASE=${{ secrets.INAT_BASE }}" >> "$GITHUB_ENV"
+          echo "ASSIGNMENT_IDS=${{ secrets.ASSIGNMENT_IDS }}" >> "$GITHUB_ENV"
+          echo "RATE_LIMIT_RPS=${{ secrets.RATE_LIMIT_RPS }}" >> "$GITHUB_ENV"
+
+      # --- Sanity: show which ones are present (masked) ---
       - name: Debug: API secrets presence (masked)
         run: |
           test -n "${SUPABASE_URL:-}" && echo "SUPABASE_URL: SET" || echo "SUPABASE_URL: EMPTY"
@@ -59,14 +68,7 @@ jobs:
           test -n "${ASSIGNMENT_IDS:-}" && echo "ASSIGNMENT_IDS: SET" || echo "ASSIGNMENT_IDS: EMPTY"
           test -n "${RATE_LIMIT_RPS:-}" && echo "RATE_LIMIT_RPS: SET" || echo "RATE_LIMIT_RPS: EMPTY"
 
-      # ---- INGEST (explicit env for this step too) ----
       - name: Run iNat ingestion script
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          INAT_BASE: ${{ secrets.INAT_BASE }}
-          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
         run: |
           set -euo pipefail
           node ingest.mjs
@@ -119,6 +121,7 @@ jobs:
             echo 'Could not detect id column in public.daily_scores'; exit 1
           fi
           echo "Detected ID_COL=$ID_COL"
+
           if [ ! -f sql/leaderboard_views.template.sql ]; then
             echo "Missing sql/leaderboard_views.template.sql"; exit 1
           fi
