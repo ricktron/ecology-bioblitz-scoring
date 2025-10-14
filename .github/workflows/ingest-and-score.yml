@@ -1,14 +1,45 @@
-insert into public.inat_obs_cache_v1
-  (obs_id, user_login, observed_at, latitude, longitude, taxon_id, ancestor_ids, quality_grade, is_captive)
-values
-  -- loop your fetched observations and bind values
-  -- (:id, :login, :observed_on, :lat, :lng, :taxon_id, :ancestors[], :quality, :captive)
-on conflict (obs_id) do update set
-  user_login    = excluded.user_login,
-  observed_at   = excluded.observed_at,
-  latitude      = excluded.latitude,
-  longitude     = excluded.longitude,
-  taxon_id      = excluded.taxon_id,
-  ancestor_ids  = excluded.ancestor_ids,
-  quality_grade = excluded.quality_grade,
-  is_captive    = excluded.is_captive;
+name: Ingest iNat and Score
+
+on:
+  schedule:
+    - cron: "0 * * * *"     # hourly; adjust as you like
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/ingest-and-score.yml"
+      - "scripts/**"
+      - "sql/**"
+
+jobs:
+  ingest-and-score:
+    runs-on: ubuntu-latest
+    env:
+      DB_URL: ${{ secrets.SUPABASE_DB_URL }}  # e.g. postgres://USER:PASSWORD@HOST:PORT/DB
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      INAT_APP_ID: ${{ secrets.INAT_APP_ID }}
+      INAT_APP_SECRET: ${{ secrets.INAT_APP_SECRET }}
+      INAT_USERNAME: ${{ secrets.INAT_USERNAME }}
+      INAT_PASSWORD: ${{ secrets.INAT_PASSWORD }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # If you use Node for ingestion
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps (ok if none)
+        run: npm ci || echo "no package.json; skipping npm ci"
+
+      - name: Run iNat ingestion script
+        run: node scripts/ingest_inat_and_score.mjs || echo "no ingest script yet; skipping"
+
+      - name: Install psql client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Apply / update views (idempotent)
+        run: psql "$DB_URL" -v ON_ERROR_STOP=1 -f sql/setup_leaderboard_views.sql
