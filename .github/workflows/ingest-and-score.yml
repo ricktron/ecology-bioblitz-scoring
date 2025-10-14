@@ -1,8 +1,18 @@
-name: "Ingest iNat and Score • vENVDEBUG8"
+name: Ingest iNat and Score • vENVDEBUG_POOLER_FIRST
 
-on: { workflow_dispatch: {} }
+on:
+  workflow_dispatch:
+  # Enable later if you want automation
+  # schedule:
+  #   - cron: "*/30 * * * *"
+  push:
+    paths:
+      - ".github/workflows/ingest-and-score.yml"
+      - "ingest.mjs"
+      - "sql/**"
 
-permissions: { contents: read }
+permissions:
+  contents: read
 
 concurrency:
   group: ingest-and-score
@@ -12,110 +22,126 @@ jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
 
+    # API + iNat knobs (used by ingest.mjs)
     env:
-      # Supabase HTTP API (for ingest.mjs)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # Aliases your script may read
-      SB_URL: ${{ secrets.SUPABASE_URL }}
-      SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # iNat / runtime knobs (ok if unset)
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
 
-      # Postgres (for psql)
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
-
     steps:
-      - name: "Checkout"
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: "Setup Node 20"
+      - name: Setup Node 20
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: "Debug (shell) - API secrets presence"
+      - name: Install deps (ok if none)
+        shell: bash
         run: |
           set -e
-          for k in SUPABASE_URL SUPABASE_SERVICE_ROLE_KEY SB_URL SB_KEY INAT_BASE ASSIGNMENT_IDS RATE_LIMIT_RPS; do
-            if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
-          done
+          if [ -f package-lock.json ]; then npm ci
+          elif [ -f package.json ]; then npm i
+          else echo "No package.json found; skipping"
+          fi
 
-      - name: "Debug (node) - env booleans"
-        run: |
-          node -e "const b=v=>!!process.env[v];console.log({SUPABASE_URL:b('SUPABASE_URL'),SUPABASE_SERVICE_ROLE_KEY:b('SUPABASE_SERVICE_ROLE_KEY'),SB_URL:b('SB_URL'),SB_KEY:b('SB_KEY')})"
-
-      - name: "Run iNat ingestion script"
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SB_URL: ${{ secrets.SUPABASE_URL }}
-          SB_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          INAT_BASE: ${{ secrets.INAT_BASE }}
-          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+      - name: Run iNat ingestion script
+        shell: bash
         run: |
           set -euo pipefail
+          node -v
           node ingest.mjs
 
-      - name: "Install psql client"
+      - name: Install psql client
         run: |
-          sudo apt-get update
+          sudo apt-get update -y
           sudo apt-get install -y postgresql-client
 
-      - name: "Debug (shell) - DB secrets presence"
+      - name: Debug (shell) — DB secrets presence
+        shell: bash
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
         run: |
           set -e
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
-            if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: EMPTY"; fi
+            if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: (missing)"; fi
           done
 
-      - name: "Choose DB URL and handshake"
+      # ── Prefer pooler first; fallback to direct DB if needed ─────────────────
+      - name: Choose DB URL and handshake
         id: pickdb
+        shell: bash
         env:
-          DB1: ${{ secrets.SUPABASE_DB_URL }}
-          DB2: ${{ secrets.SUPABASE_POOL_URL }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
         run: |
           set -euo pipefail
-          use="$DB1"
-          if [ -n "$use" ]; then
-            echo "Trying direct (5432)"
-            psql "$use" -v VERBOSITY=verbose -c "\conninfo"
-            psql "$use" -Atc "select 1"
+          USE_URL=""
+
+          if [ -n "${SUPABASE_POOL_URL:-}" ]; then
+            echo "Trying pooler (6543)…"
+            if psql "${SUPABASE_POOL_URL}" -Atc "select 1" >/dev/null 2>&1; then
+              USE_URL="${SUPABASE_POOL_URL}"
+              echo "Pooler OK."
+            else
+              echo "Pooler URI failed."
+            fi
+          fi
+
+          if [ -z "$USE_URL" ] && [ -n "${SUPABASE_DB_URL:-}" ]; then
+            echo "Trying direct (5432)…"
+            if psql "${SUPABASE_DB_URL}" -Atc "select 1" >/dev/null 2>&1; then
+              USE_URL="${SUPABASE_DB_URL}"
+              echo "Direct DB OK."
+            else
+              echo "Direct DB URI failed."
+            fi
+          fi
+
+          if [ -z "$USE_URL" ]; then
+            echo "::error title=DB handshake::Could not reach either DB URL from GitHub Actions.
+            Hints: project running, URLs correct, keep '?sslmode=require'."
+            exit 2
+          fi
+
+          echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
+          echo "USE_URL=$USE_URL" >> "$GITHUB_ENV"
+
+      - name: Generate SQL with correct id column
+        id: gensql
+        shell: bash
+        env:
+          USE_URL: ${{ steps.pickdb.outputs.use_url }}
+        run: |
+          set -euo pipefail
+
+          check_col () { psql "$USE_URL" -Atc "select 1 from information_schema.columns \
+            where table_schema='public' and table_name='daily_scores' and column_name='$1'" | grep -q 1; }
+
+          if check_col student_id; then ID_COL=student_id
+          elif check_col roster_id; then ID_COL=roster_id
+          elif check_col person_id; then ID_COL=person_id
           else
-            use="$DB2"
-            [ -n "$use" ] || { echo "No DB URL present."; exit 1; }
-            echo "Trying pooler (6543)"
-            psql "$use" -v VERBOSITY=verbose -c "\conninfo"
-            psql "$use" -Atc "select 1"
+            echo "::error title=Missing id column::daily_scores must have one of: student_id, roster_id, person_id"
+            exit 1
           fi
-          echo "use_url=$use" >> "$GITHUB_OUTPUT"
-          echo "Handshake OK"
 
-      - name: "Generate SQL with correct id column"
+          echo "Detected ID_COL=${ID_COL}"
+          sed -e "s/__ID_COL__/${ID_COL}/g" \
+            sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
+          echo "id_col=$ID_COL" >> "$GITHUB_OUTPUT"
+
+      - name: Apply / update views (idempotent)
+        shell: bash
+        env:
+          USE_URL: ${{ steps.pickdb.outputs.use_url }}
         run: |
           set -euo pipefail
-          USE_URL="${{ steps.pickdb.outputs.use_url }}"
-          ID_COL=$(psql "$USE_URL" -Atc "
-            select column_name
-            from information_schema.columns
-            where table_schema='public'
-              and table_name='daily_scores'
-              and column_name in ('student_id','roster_id','person_id')
-            limit 1;")
-          if [ -z "$ID_COL" ]; then
-            echo 'Could not detect id column in public.daily_scores'; exit 1
-          fi
-          sed "s/__ID_COL__/$ID_COL/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
-          echo "Detected ID_COL=$ID_COL and generated sql/_gen_leaderboard_views.sql"
-
-      - name: "Apply / update views (idempotent)"
-        run: |
-          set -euo pipefail
-          USE_URL="${{ steps.pickdb.outputs.use_url }}"
+          echo "Handshake:"
+          psql "$USE_URL" -Atc "select current_user, current_database(), inet_client_addr()"
+          echo "Applying SQL…"
           psql "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
