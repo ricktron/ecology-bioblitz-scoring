@@ -1,9 +1,7 @@
-name: Ingest iNat and Score
+name: Ingest iNat and Score v7
 
 on:
   workflow_dispatch:
-  # schedule:
-  #   - cron: "*/30 * * * *"
   push:
     paths:
       - ".github/workflows/ingest-and-score.yml"
@@ -22,18 +20,14 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Supabase HTTP API used by ingest.mjs
+      # HTTP API used by ingest.mjs
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # Ingestion knobs
+      # iNat knobs
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-
-      # Database URLs (set as Actions secrets)
-      SUPABASE_DB_URL:   ${{ secrets.SUPABASE_DB_URL }}
-      SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
     steps:
       - name: Checkout
@@ -44,7 +38,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install deps if present
+      - name: Install deps (ok if none)
         shell: bash
         run: |
           set -e
@@ -53,68 +47,106 @@ jobs:
           else echo "No package.json found; skipping"
           fi
 
-      - name: Run ingestion script
-        shell: bash
-        run: |
-          set -euo pipefail
-          node ingest.mjs
-
-      - name: Install psql client and dnsutils
+      - name: Install psql client + dnsutils
         shell: bash
         run: |
           set -e
           sudo apt-get update -y
           sudo apt-get install -y postgresql-client dnsutils
 
-      - name: Debug secrets presence
+      - name: Debug secrets presence (DB)
         shell: bash
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_POOL_URL: ${{ secrets.SUPABASE_POOL_URL }}
         run: |
           set -e
           for k in SUPABASE_DB_URL SUPABASE_POOL_URL; do
-            if [ -n "${!k:-}" ]; then echo "$k=SET"; else echo "$k=MISSING"; fi
+            v="${!k:-}"
+            if [ -n "$v" ]; then echo "$k: SET"; else echo "$k: MISSING"; fi
           done
 
-      - name: Choose DB URL and handshake
+      - name: Pick DB URL and test connect
         id: pickdb
         shell: bash
         env:
-          DB_URL_DIRECT: ${{ env.SUPABASE_DB_URL }}
-          DB_URL_POOL:   ${{ env.SUPABASE_POOL_URL }}
+          DB_URL_DIRECT: ${{ secrets.SUPABASE_DB_URL }}
+          DB_URL_POOL:   ${{ secrets.SUPABASE_POOL_URL }}
         run: |
           set -euo pipefail
 
-          # prefer pooler if provided
+          # Simple parser for postgres URI using python
+          parse() {
+            python3 - "$1" <<'PY'
+import sys, urllib.parse as U
+u = U.urlparse(sys.argv[1])
+print(u.username or '')
+print(u.password or '')
+print(u.hostname or '')
+print(str(u.port or 5432))
+p = (u.path or '/').lstrip('/')
+print((p.split('/')[0]) or 'postgres')
+PY
+          }
+
+          try_url() {
+            local url="$1" label="$2"
+            if [ -z "${url:-}" ]; then
+              echo "SKIP $label: empty url"
+              return 1
+            fi
+
+            read -r UUSER UPASS UHOST UPORT UDB <<<"$(parse "$url")"
+            echo "Test $label:"
+            echo "  host=$UHOST port=$UPORT db=$UDB user=$UUSER"
+
+            # prefer IPv4 if available
+            A="$(dig +short A "$UHOST" | head -1 || true)"
+            AAAA="$(dig +short AAAA "$UHOST" | head -1 || true)"
+            echo "  A=$A AAAA=$AAAA"
+
+            export PGPASSWORD="$UPASS" PGSSLMODE=require
+            if psql "$url" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
+              echo "  psql ok"
+              return 0
+            fi
+
+            # If IPv6 only and runner has no v6, try hostaddr=IPv4 if present
+            if [ -n "$A" ]; then
+              DSN="hostaddr=$A host=$UHOST port=$UPORT dbname=$UDB user=$UUSER sslmode=require"
+              if psql "$DSN" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
+                echo "  psql ok via IPv4 hostaddr"
+                echo "use_url=$DSN" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
+            fi
+
+            echo "  psql failed"
+            return 1
+          }
+
           USE_URL=""
-          if [ -n "${DB_URL_POOL:-}" ]; then
-            if PGPASSWORD="$(python3 - <<'PY'
-import sys,urllib.parse as U
-u=U.urlparse(sys.argv[1]); print(u.password or "")
-PY
-            "$DB_URL_POOL")" PGSSLMODE=require psql "$DB_URL_POOL" -Atc "select 1" >/dev/null 2>&1; then
-              USE_URL="$DB_URL_POOL"
-            fi
-          fi
-
-          if [ -z "$USE_URL" ] && [ -n "${DB_URL_DIRECT:-}" ]; then
-            if PGPASSWORD="$(python3 - <<'PY'
-import sys,urllib.parse as U
-u=U.urlparse(sys.argv[1]); print(u.password or "")
-PY
-            "$DB_URL_DIRECT")" PGSSLMODE=require psql "$DB_URL_DIRECT" -Atc "select 1" >/dev/null 2>&1; then
-              USE_URL="$DB_URL_DIRECT"
-            fi
-          fi
-
-          if [ -z "$USE_URL" ]; then
-            echo "Could not reach either DB URL from the runner."
+          # Try pooler first (usually has IPv4), then direct
+          if try_url "${DB_URL_POOL:-}" "pooler"; then
+            USE_URL="${DB_URL_POOL}"
+          elif try_url "${DB_URL_DIRECT:-}" "direct"; then
+            USE_URL="${DB_URL_DIRECT}"
+          else
+            echo "Could not reach either DB URL from GitHub Actions."
             echo "Hints:"
-            echo "  - Secrets must be exact postgres URLs ending with ?sslmode=require"
-            echo "  - Project must be running (not paused)"
-            echo "  - Network Restrictions must allow GitHub Actions egress"
+            echo "  - Both secrets must end with ?sslmode=require"
+            echo "  - Project not paused"
+            echo "  - Network Restrictions allow GitHub egress"
             exit 2
           fi
 
           echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Run iNat ingestion
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ingest.mjs
 
       - name: Generate SQL with correct id column
         id: gensql
@@ -123,11 +155,7 @@ PY
           USE_URL: ${{ steps.pickdb.outputs.use_url }}
         run: |
           set -euo pipefail
-          check_col () {
-            psql "$USE_URL" -Atc "select 1 from information_schema.columns \
-              where table_schema='public' and table_name='daily_scores' and column_name='$1'" | grep -q 1
-          }
-
+          check_col () { psql "$USE_URL" -Atc "select 1 from information_schema.columns where table_schema='public' and table_name='daily_scores' and column_name='$1'" | grep -q 1; }
           if   check_col student_id; then ID_COL=student_id
           elif check_col roster_id;  then ID_COL=roster_id
           elif check_col person_id;  then ID_COL=person_id
@@ -135,12 +163,10 @@ PY
             echo "daily_scores must have one of: student_id, roster_id, person_id"
             exit 1
           fi
+          echo "Detected ID_COL=$ID_COL"
+          sed -e "s/__ID_COL__/${ID_COL}/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
 
-          echo "Detected ID_COL=${ID_COL}"
-          sed -e "s/__ID_COL__/${ID_COL}/g" \
-            sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
-
-      - name: Apply or update views
+      - name: Apply / update views (idempotent)
         shell: bash
         env:
           USE_URL: ${{ steps.pickdb.outputs.use_url }}
