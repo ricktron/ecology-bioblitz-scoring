@@ -49,6 +49,22 @@ async function http(method, url, body, headers = {}) {
 
 const toUTC = (iso) => (iso ? new Date(iso).toISOString() : null);
 
+// ---- NEW: Job Metadata Functions -----------------------------------------
+
+async function getLastSuccessfulRun(assignmentId) {
+  const { json } = await http("GET", `${PGR}/job_metadata?assignment_id=eq.${assignmentId}&select=last_successful_run_utc`, null, HDR);
+  return json?.[0]?.last_successful_run_utc;
+}
+
+async function updateLastSuccessfulRun(assignmentId, timestamp) {
+  const payload = {
+    assignment_id: assignmentId,
+    last_successful_run_utc: timestamp,
+  };
+  await upsert("job_metadata", [payload], "assignment_id");
+}
+
+
 // ---- iNat fetch ------------------------------------------------------
 
 async function* inatObsPager(params) {
@@ -308,7 +324,14 @@ async function processAssignment(ASSIGN) {
   const userLogins = Array.from(idsMap.login.keys());
   if (!userLogins.length) { console.log("  ! No iNat usernames in student_identities; skipping fetch."); return; }
 
+  // --- MODIFIED: Use last run timestamp ---
+  const lastRun = await getLastSuccessfulRun(ASSIGN);
   const params = { user_id: userLogins.join(","), d1, d2 };
+  if (lastRun) {
+    params.updated_since = lastRun;
+  }
+  // --- END MODIFICATION ---
+
   let totalFetched = 0; let maxUpdated = null;
 
   for await (const page of inatObsPager(params)) {
@@ -327,6 +350,13 @@ async function processAssignment(ASSIGN) {
   const rows = await loadJoined(ASSIGN);
   const byStudent = scoreAll(rows, rubric);
   await writeScores(ASSIGN, byStudent, maxUpdated);
+  
+  // --- NEW: Update last run timestamp ---
+  if (maxUpdated) {
+    await updateLastSuccessfulRun(ASSIGN, maxUpdated);
+  }
+  // --- END NEW ---
+
   console.log(`✓ Finished ${ASSIGN}: ${rows.length} linked rows, ${byStudent.size} students`);
 }
 
