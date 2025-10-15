@@ -66,7 +66,7 @@ jobs:
             if [ -n "$v" ]; then echo "$k: SET"; else echo "$k: MISSING"; fi
           done
 
-      - name: Pick DB URL and test connect
+- name: Pick DB URL and test connect
         id: pickdb
         shell: bash
         env:
@@ -77,16 +77,7 @@ jobs:
 
           # Simple parser for postgres URI using python
           parse() {
-            python3 - "$1" <<'PY'
-import sys, urllib.parse as U
-u = U.urlparse(sys.argv[1])
-print(u.username or '')
-print(u.password or '')
-print(u.hostname or '')
-print(str(u.port or 5432))
-p = (u.path or '/').lstrip('/')
-print((p.split('/')[0]) or 'postgres')
-PY
+            python3 -c "import sys, urllib.parse as U; u = U.urlparse(sys.argv[1]); print(u.username or ''); print(u.password or ''); print(u.hostname or ''); print(str(u.port or 5432)); p = (u.path or '/').lstrip('/'); print((p.split('/')[0]) or 'postgres')" "$1"
           }
 
           try_url() {
@@ -141,7 +132,6 @@ PY
           fi
 
           echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
-
       - name: Run iNat ingestion
         shell: bash
         run: |
