@@ -1,91 +1,69 @@
-name: Ingest iNat and Score v7
+name: Ingest iNaturalist Data and Score
 
 on:
-  workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/ingest-and-score.yml"
-      - "ingest.mjs"
-      - "sql/**"
+  workflow_dispatch: # Allows manual triggering
+  # schedule:
+  #   - cron: '0 2 * * *' # Uncomment for scheduled runs (e.g., daily at 2 AM UTC)
 
+# Security Best Practice: Restrict GITHUB_TOKEN permissions to the minimum required
 permissions:
   contents: read
 
-concurrency:
-  group: ingest-and-score
-  cancel-in-progress: true
-
 jobs:
-  ingest-and-score:
+  data-pipeline:
+    name: Fetch, Ingest, and Process Data
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # Safety measure for long-running or stuck jobs
+
+    # =================================================================
+    # CRITICAL FIX: Job-Level Environment Configuration
+    # This maps GitHub Secrets into the OS Environment for all steps in this job.
+    # =================================================================
+    env:
+      # Supabase API Access (Required by Supabase SDK)
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # Database Connection String
+      # CRITICAL: We map the Pooler URL (IPv4 compatible) to the variable the app expects.
+      # This is required as the GitHub Actions environment cannot reliably connect to the Direct URL.
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
+
+      # iNaturalist Configuration
+      INAT_BASE: ${{ secrets.INAT_BASE }}
+      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+
+      # Application Settings
+      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+      NODE_ENV: production
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node 20
+      - name: Setup Node.js LTS
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20.x' # Use a stable LTS version (e.g., Node 20)
+          cache: 'npm' # Cache dependencies to speed up future runs
 
       - name: Install dependencies
-        shell: bash
-        run: |
-          if [ -f package-lock.json ]; then npm ci; fi
+        # Best Practice: Use 'npm ci' (Clean Install) for reliable, reproducible builds in CI/CD
+        run: npm ci
 
-      - name: Install psql client
-        shell: bash
+      # Robustness Check: Verify variables are present in the shell BEFORE running the application.
+      - name: Verify Environment Availability
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y postgresql-client
+          echo "Checking critical environment variables in the shell..."
+          if [ -z "$SUPABASE_URL" ]; then echo "::error::SUPABASE_URL is missing."; exit 1; fi
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo "::error::SUPABASE_SERVICE_ROLE_KEY is missing."; exit 1; fi
+          if [ -z "$SUPABASE_DB_URL" ]; then echo "::error::SUPABASE_DB_URL (Pooler) is missing."; exit 1; fi
+          echo "Environment ready."
 
-      - name: Test DB Connection and Set URL
-        id: pickdb
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Attempting to connect with Pooler URL..."
-          if psql "${{ secrets.SUPABASE_POOL_URL }}" -c "select 1;" >/dev/null 2>&1; then
-            echo "Pooler connection successful."
-            # Set USE_URL for all subsequent steps in this job
-            echo "USE_URL=${{ secrets.SUPABASE_POOL_URL }}" >> "$GITHUB_ENV"
-          else
-            echo "Pooler connection failed. This should not happen based on previous tests."
-            exit 1
-          fi
+      - name: Run Data Ingestion
+        # The Node.js process now correctly inherits the environment variables defined at the job level.
+        run: node ingest.mjs
 
-      - name: Run iNat ingestion
-        shell: bash
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          INAT_BASE: ${{ secrets.INAT_BASE }}
-          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-        run: |
-          set -euo pipefail
-          node ingest.mjs
-
-      - name: Generate SQL with correct id column
-        id: gensql
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The USE_URL env var is now automatically available here
-          check_col () { psql "$USE_URL" -Atc "select 1 from information_schema.columns where table_schema='public' and table_name='daily_scores' and column_name='$1'" | grep -q 1; }
-          if   check_col student_id; then ID_COL=student_id
-          elif check_col roster_id;  then ID_COL=roster_id
-          elif check_col person_id;  then ID_COL=person_id
-          else
-            echo "daily_scores must have one of: student_id, roster_id, person_id"
-            exit 1
-          fi
-          echo "Detected ID_COL=$ID_COL"
-          sed -e "s/__ID_COL__/${ID_COL}/g" sql/leaderboard_views.template.sql > sql/_gen_leaderboard_views.sql
-
-      - name: Apply / update views (idempotent)
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The USE_URL env var is now automatically available here
-          psql "$USE_URL" -v ON_ERROR_STOP=1 -f sql/_gen_leaderboard_views.sql
+      # Add subsequent steps (e.g., scoring) here. They will also inherit the environment variables.
+      # - name: Run Scoring Calculation
+      #   run: node score.mjs
