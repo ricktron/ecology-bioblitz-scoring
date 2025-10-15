@@ -72,49 +72,57 @@ jobs:
             if [ -n "${!k:-}" ]; then echo "$k: SET"; else echo "$k: (missing)"; fi
           done
 
-      - name: Choose DB URL and handshake (simple)
+      - name: Choose DB URL and handshake (verbose)
         id: pickdb
         shell: bash
         env:
           DB_URL_DIRECT: ${{ secrets.SUPABASE_DB_URL }}
-          DB_URL_POOL: ${{ secrets.SUPABASE_POOL_URL }}
+          DB_URL_POOL:   ${{ secrets.SUPABASE_POOL_URL }}
         run: |
           set -euo pipefail
 
-          try_url () {
+          check() {
             url="$1"; label="$2"
             echo "::group::Handshake: $label"
             if [ -z "${url:-}" ]; then
-              echo "URL empty for $label"
+              echo "URL is empty for $label"
               echo "::endgroup::"
               return 1
             fi
 
-            # Quick connection test
-            if psql "$url" -Atc "select 1" >/dev/null 2>&1; then
-              echo "psql: OK for $label"
+            host=$(printf '%s' "$url" | sed -E 's#^[a-z]+://[^@]*@([^:/?]+).*#\1#')
+            port=$(printf '%s' "$url" | sed -nE 's#.*:([0-9]+)/.*#\1#p'); port=${port:-5432}
+            db=$(printf '%s' "$url" | sed -E 's#^.*/([^/?]+).*#\1#')
+
+            echo "host=$host"
+            echo "port=$port"
+            echo "db=$db"
+            echo -n "DNS A records   : "; dig +short A     "$host" | tr '\n' ' '; echo
+            echo -n "DNS AAAA records: "; dig +short AAAA  "$host" | tr '\n' ' '; echo
+            psql --version || true
+
+            set +e
+            out=$(psql "$url" -v VERBOSITY=verbose -Atc "select 1" 2>&1)
+            rc=$?
+            set -e
+            echo "psql output (rc=$rc):"
+            echo "$out"
+
+            if [ "$rc" -eq 0 ]; then
+              echo "OK: $label"
               echo "use_url=$url" >> "$GITHUB_OUTPUT"
               echo "::endgroup::"
               return 0
             fi
 
-            echo "psql: FAILED for $label"
-            host=$(printf '%s' "$url" | sed -E 's#^[^/]+://[^@]*@([^:/?]+).*#\1#')
-            port=$(printf '%s' "$url" | sed -nE 's#.*:([0-9]+)/.*#\1#p')
-            port=${port:-5432}
-
-            echo "Host parsed : $host"
-            echo "Port parsed : $port"
-            echo "dig A       :"
-            dig +short A "$host" || true
+            echo "FAILED: $label"
             echo "::endgroup::"
             return 1
           }
 
-          # Prefer pooler (6543), then direct (5432)
-          if try_url "${DB_URL_POOL:-}" "Pooler (6543)"; then
+          if check "${DB_URL_POOL:-}" "Pooler (6543)"; then
             :
-          elif try_url "${DB_URL_DIRECT:-}" "Direct (5432)"; then
+          elif check "${DB_URL_DIRECT:-}" "Direct (5432)"; then
             :
           else
             echo "::error title=DB handshake::Could not reach either DB URL from GitHub Actions."
