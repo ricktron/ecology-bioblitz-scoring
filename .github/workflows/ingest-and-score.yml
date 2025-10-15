@@ -40,77 +40,28 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci; fi
 
-      - name: Install psql client and dnsutils
+      - name: Install psql client
         shell: bash
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y postgresql-client dnsutils
+          sudo apt-get install -y postgresql-client
 
-      - name: Pick DB URL and test connect
+      - name: Test DB Connection and Set URL
         id: pickdb
         shell: bash
         run: |
           set -euo pipefail
-
-          PY_PARSER_SCRIPT="
-          import sys, urllib.parse as U;
-          u = U.urlparse(sys.argv[1]);
-          print(u.username or '');
-          print(u.password or '');
-          print(u.hostname or '');
-          print(str(u.port or 5432));
-          p = (u.path or '/').lstrip('/');
-          print((p.split('/')[0]) or 'postgres')
-          "
-          parse() {
-            python3 -c "$PY_PARSER_SCRIPT" "$1"
-          }
-
-          try_url() {
-            local url="$1" label="$2"
-            if [ -z "${url:-}" ]; then
-              echo "SKIP $label: empty url"
-              return 1
-            fi
-
-            read -r UUSER UPASS UHOST UPORT UDB <<<"$(parse "$url")"
-            echo "Test $label:"
-            echo "  host=$UHOST port=$UPORT db=$UDB user=$UUSER"
-
-            A="$(dig +short A "$UHOST" | head -1 || true)"
-            AAAA="$(dig +short AAAA "$UHOST" | head -1 || true)"
-            echo "  A=$A AAAA=$AAAA"
-
-            export PGPASSWORD="$UPASS" PGSSLMODE=require
-            if psql "$url" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
-              echo "  psql ok"
-              return 0
-            fi
-
-            if [ -n "$A" ]; then
-              DSN="hostaddr=$A host=$UHOST port=$UPORT dbname=$UDB user=$UUSER sslmode=require"
-              if psql "$DSN" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
-                echo "  psql ok via IPv4 hostaddr"
-                echo "use_url=$DSN" >> "$GITHUB_OUTPUT"
-                return 0
-              fi
-            fi
-
-            echo "  psql failed"
-            return 1
-          }
-
-          USE_URL=""
-          if try_url "${{ secrets.SUPABASE_POOL_URL }}" "pooler"; then
-            USE_URL="${{ secrets.SUPABASE_POOL_URL }}"
-          elif try_url "${{ secrets.SUPABASE_DB_URL }}" "direct"; then
-            USE_URL="${{ secrets.SUPABASE_DB_URL }}"
+          echo "Attempting to connect with Pooler URL..."
+          # Use the Pooler URL directly. psql can parse the full URL.
+          # The password is part of the secret URL itself.
+          if psql "${{ secrets.SUPABASE_POOL_URL }}" -c "select 1;" >/dev/null 2>&1; then
+            echo "Pooler connection successful."
+            # Set the output for subsequent steps
+            echo "use_url=${{ secrets.SUPABASE_POOL_URL }}" >> "$GITHUB_OUTPUT"
           else
-            echo "Could not reach either DB URL from GitHub Actions."
-            exit 2
+            echo "Pooler connection failed. Please double-check your SUPABASE_POOL_URL secret and password."
+            exit 1
           fi
-
-          echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
 
       - name: Run iNat ingestion
         shell: bash
