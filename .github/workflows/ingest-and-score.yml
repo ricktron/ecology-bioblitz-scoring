@@ -19,13 +19,6 @@ jobs:
   ingest-and-score:
     runs-on: ubuntu-latest
 
-    env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      INAT_BASE: ${{ secrets.INAT_BASE }}
-      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -52,19 +45,22 @@ jobs:
         run: |
           set -euo pipefail
           echo "Attempting to connect with Pooler URL..."
-          # Use the Pooler URL directly. psql can parse the full URL.
-          # The password is part of the secret URL itself.
           if psql "${{ secrets.SUPABASE_POOL_URL }}" -c "select 1;" >/dev/null 2>&1; then
             echo "Pooler connection successful."
-            # Set the output for subsequent steps
             echo "use_url=${{ secrets.SUPABASE_POOL_URL }}" >> "$GITHUB_OUTPUT"
           else
-            echo "Pooler connection failed. Please double-check your SUPABASE_POOL_URL secret and password."
+            echo "Pooler connection failed. This is the final point of failure."
             exit 1
           fi
 
       - name: Run iNat ingestion
         shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          INAT_BASE: ${{ secrets.INAT_BASE }}
+          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
         run: |
           set -euo pipefail
           node ingest.mjs
