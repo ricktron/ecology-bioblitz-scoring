@@ -20,11 +20,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # HTTP API used by ingest.mjs
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # iNat knobs
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
@@ -38,19 +35,14 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install deps (ok if none)
+      - name: Install dependencies
         shell: bash
         run: |
-          set -e
-          if [ -f package-lock.json ]; then npm ci
-          elif [ -f package.json ]; then npm i
-          else echo "No package.json found; skipping"
-          fi
+          if [ -f package-lock.json ]; then npm ci; fi
 
-      - name: Install psql client + dnsutils
+      - name: Install psql client and dnsutils
         shell: bash
         run: |
-          set -e
           sudo apt-get update -y
           sudo apt-get install -y postgresql-client dnsutils
 
@@ -115,10 +107,6 @@ jobs:
             USE_URL="${{ secrets.SUPABASE_DB_URL }}"
           else
             echo "Could not reach either DB URL from GitHub Actions."
-            echo "Hints:"
-            echo "  - Both secrets must end with ?sslmode=require"
-            echo "  - Project not paused"
-            echo "  - Network Restrictions allow GitHub egress"
             exit 2
           fi
 
