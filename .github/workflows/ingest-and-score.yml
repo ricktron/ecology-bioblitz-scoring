@@ -66,7 +66,7 @@ jobs:
             if [ -n "$v" ]; then echo "$k: SET"; else echo "$k: MISSING"; fi
           done
 
-- name: Pick DB URL and test connect
+      - name: Pick DB URL and test connect
         id: pickdb
         shell: bash
         env:
@@ -75,9 +75,18 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Simple parser for postgres URI using python
+          PY_PARSER_SCRIPT="
+          import sys, urllib.parse as U;
+          u = U.urlparse(sys.argv[1]);
+          print(u.username or '');
+          print(u.password or '');
+          print(u.hostname or '');
+          print(str(u.port or 5432));
+          p = (u.path or '/').lstrip('/');
+          print((p.split('/')[0]) or 'postgres')
+          "
           parse() {
-            python3 -c "import sys, urllib.parse as U; u = U.urlparse(sys.argv[1]); print(u.username or ''); print(u.password or ''); print(u.hostname or ''); print(str(u.port or 5432)); p = (u.path or '/').lstrip('/'); print((p.split('/')[0]) or 'postgres')" "$1"
+            python3 -c "$PY_PARSER_SCRIPT" "$1"
           }
 
           try_url() {
@@ -91,7 +100,6 @@ jobs:
             echo "Test $label:"
             echo "  host=$UHOST port=$UPORT db=$UDB user=$UUSER"
 
-            # prefer IPv4 if available
             A="$(dig +short A "$UHOST" | head -1 || true)"
             AAAA="$(dig +short AAAA "$UHOST" | head -1 || true)"
             echo "  A=$A AAAA=$AAAA"
@@ -102,7 +110,6 @@ jobs:
               return 0
             fi
 
-            # If IPv6 only and runner has no v6, try hostaddr=IPv4 if present
             if [ -n "$A" ]; then
               DSN="hostaddr=$A host=$UHOST port=$UPORT dbname=$UDB user=$UUSER sslmode=require"
               if psql "$DSN" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
@@ -117,7 +124,6 @@ jobs:
           }
 
           USE_URL=""
-          # Try pooler first (usually has IPv4), then direct
           if try_url "${DB_URL_POOL:-}" "pooler"; then
             USE_URL="${DB_URL_POOL}"
           elif try_url "${DB_URL_DIRECT:-}" "direct"; then
@@ -132,6 +138,7 @@ jobs:
           fi
 
           echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
+
       - name: Run iNat ingestion
         shell: bash
         run: |
