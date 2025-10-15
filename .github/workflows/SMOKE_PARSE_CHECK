@@ -1,8 +1,24 @@
-# .github/workflows/SMOKE_PARSE_CHECK.yml
 name: SMOKE_PARSE_CHECK
-on: workflow_dispatch
+
+on:
+  workflow_dispatch:
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - run: echo yaml ok
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate workflow YAML
+        shell: bash
+        run: |
+          set -e
+          python3 -m pip install --user pyyaml >/dev/null
+          python3 - <<'PY'
+import yaml, sys
+p = ".github/workflows/ingest-and-score.yml"
+with open(p, "r", encoding="utf-8") as f:
+    yaml.safe_load(f)
+print("YAML OK:", p)
+PY
