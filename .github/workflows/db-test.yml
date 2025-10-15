@@ -1,0 +1,25 @@
+name: DB Connection Test
+
+on:
+  workflow_dispatch: # Allows manual triggering
+  push:
+    paths:
+      - ".github/workflows/db-test.yml"
+
+jobs:
+  test-db-connection:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install psql client
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y postgresql-client
+
+      - name: Attempt Connection
+        shell: bash
+        run: |
+          echo "Attempting to connect with Pooler URL..."
+          PGPASSWORD="${{ secrets.N8mSHB9q2ETkEHmY }}" psql "${{ secrets.SUPABASE_POOL_URL }}" -c "select 1;" || echo "Pooler connection failed."
+          
+          echo "Attempting to connect with Direct URL..."
+          PGPASSWORD="${{ secrets.N8mSHB9q2ETkEHmY }}" psql "${{ secrets.SUPABASE_DB_URL }}" -c "select 1;" || echo "Direct connection failed."
