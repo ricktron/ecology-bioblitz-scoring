@@ -1,14 +1,10 @@
 name: SMOKE_PARSE_CHECK
-
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - ".github/workflows/SMOKE_PARSE_CHECK.yml"
 
 jobs:
   smoke:
     runs-on: ubuntu-latest
     steps:
-      - name: echo ok
-        run: echo "YAML parsed"
+      - name: Parse only
+        run: echo "yaml is valid"
