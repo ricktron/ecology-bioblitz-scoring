@@ -65,17 +65,12 @@ jobs:
             v="${!k:-}"
             if [ -n "$v" ]; then echo "$k: SET"; else echo "$k: MISSING"; fi
           done
-
+      
       - name: Debug secrets values
         shell: bash
         run: |
           echo "SUPABASE_DB_URL is set: ${{ secrets.SUPABASE_DB_URL != '' }}"
           echo "SUPABASE_POOL_URL is set: ${{ secrets.SUPABASE_POOL_URL != '' }}"
-
-      - name: Pick DB URL and test connect
-        id: pickdb
-        shell: bash
-        # ... rest of the step
 
       - name: Pick DB URL and test connect
         id: pickdb
