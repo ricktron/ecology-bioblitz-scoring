@@ -40,33 +40,77 @@ jobs:
         run: |
           if [ -f package-lock.json ]; then npm ci; fi
 
-      - name: Install psql client
+      - name: Install psql client and dnsutils
         shell: bash
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y postgresql-client dnsutils
 
       - name: Pick DB URL and test connect
         id: pickdb
         shell: bash
         run: |
           set -euo pipefail
-          echo "Attempting to connect with Pooler URL..."
-          if psql "${{ secrets.SUPABASE_POOL_URL }}" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
-            echo "Pooler connection successful."
-            echo "use_url=${{ secrets.SUPABASE_POOL_URL }}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "Pooler connection failed. Trying Direct URL..."
 
-          if psql "${{ secrets.SUPABASE_DB_URL }}" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
-            echo "Direct DB connection successful."
-            echo "use_url=${{ secrets.SUPABASE_DB_URL }}" >> "$GITHUB_OUTPUT"
-            exit 0
+          PY_PARSER_SCRIPT="
+          import sys, urllib.parse as U;
+          u = U.urlparse(sys.argv[1]);
+          print(u.username or '');
+          print(u.password or '');
+          print(u.hostname or '');
+          print(str(u.port or 5432));
+          p = (u.path or '/').lstrip('/');
+          print((p.split('/')[0]) or 'postgres')
+          "
+          parse() {
+            python3 -c "$PY_PARSER_SCRIPT" "$1"
+          }
+
+          try_url() {
+            local url="$1" label="$2"
+            if [ -z "${url:-}" ]; then
+              echo "SKIP $label: empty url"
+              return 1
+            fi
+
+            read -r UUSER UPASS UHOST UPORT UDB <<<"$(parse "$url")"
+            echo "Test $label:"
+            echo "  host=$UHOST port=$UPORT db=$UDB user=$UUSER"
+
+            A="$(dig +short A "$UHOST" | head -1 || true)"
+            AAAA="$(dig +short AAAA "$UHOST" | head -1 || true)"
+            echo "  A=$A AAAA=$AAAA"
+
+            export PGPASSWORD="$UPASS" PGSSLMODE=require
+            if psql "$url" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
+              echo "  psql ok"
+              return 0
+            fi
+
+            if [ -n "$A" ]; then
+              DSN="hostaddr=$A host=$UHOST port=$UPORT dbname=$UDB user=$UUSER sslmode=require"
+              if psql "$DSN" -v VERBOSITY=verbose -Atc "select 1" >/dev/null 2>&1; then
+                echo "  psql ok via IPv4 hostaddr"
+                echo "use_url=$DSN" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
+            fi
+
+            echo "  psql failed"
+            return 1
+          }
+
+          USE_URL=""
+          if try_url "${{ secrets.SUPABASE_POOL_URL }}" "pooler"; then
+            USE_URL="${{ secrets.SUPABASE_POOL_URL }}"
+          elif try_url "${{ secrets.SUPABASE_DB_URL }}" "direct"; then
+            USE_URL="${{ secrets.SUPABASE_DB_URL }}"
+          else
+            echo "Could not reach either DB URL from GitHub Actions."
+            exit 2
           fi
-          
-          echo "Could not reach either DB URL. Please check Network Restrictions in Supabase."
-          exit 1
+
+          echo "use_url=$USE_URL" >> "$GITHUB_OUTPUT"
 
       - name: Run iNat ingestion
         shell: bash
