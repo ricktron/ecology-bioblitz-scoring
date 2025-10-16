@@ -11,18 +11,9 @@ jobs:
     name: Fetch, Ingest, and Process Data
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Ensure no 'environment:' is specified here, so it uses Repository Secrets.
 
-    # =================================================================
-    # CRITICAL BLOCK: Must be indented correctly under the job definition.
-    # =================================================================
+    # Job-level env for general settings only (if any). Secrets are moved to the step level.
     env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
-      INAT_BASE: ${{ secrets.INAT_BASE }}
-      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
       NODE_ENV: production
 
     steps:
@@ -38,43 +29,45 @@ jobs:
         run: npm install
 
       # =================================================================
-      # FORENSIC DIAGNOSTIC STEP
-      # This checks the environment in the shell (Bash) before Node.js runs.
+      # DIAGNOSTIC: Verify Node.js Environment Perspective
+      # This confirms that a standard Node.js process can see the variables
+      # when explicitly injected at the step level.
       # =================================================================
-      - name: Forensic Environment Diagnosis
+      - name: Forensic Environment Diagnosis (Node.js)
         run: |
-          echo "Running environment diagnostics in the shell (Bash)..."
+          echo "Checking environment inside a controlled Node.js process..."
+          node -e '
+            const url = process.env.SUPABASE_URL;
+            const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+            if (!url || !key) {
+              console.error("::error::NODE.JS DIAGNOSIS FAILURE: Variables missing even with explicit step injection. This indicates a severe runner issue.");
+              process.exit(1);
+            } else {
+              console.log("NODE.JS DIAGNOSIS SUCCESS: Variables are visible to Node.js via explicit injection.");
+            }
+          '
+        # Explicit injection for the diagnostic step
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-          # Check SUPABASE_URL
-          if [ -z "$SUPABASE_URL" ]; then
-            echo "::error::DIAGNOSIS FAILURE: SUPABASE_URL is EMPTY or NULL in the Bash environment."
-            echo "Potential Causes:"
-            echo "1. The 'env:' block in this YAML file is missing or incorrectly indented."
-            echo "2. The Repository Secret 'SUPABASE_URL' is empty."
-            echo "3. The job is referencing an 'environment:' that does not contain this secret."
-            exit 1
-          else
-            echo "DIAGNOSIS SUCCESS: SUPABASE_URL is present in Bash (value masked)."
-          fi
-
-          # Check SUPABASE_SERVICE_ROLE_KEY
-          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
-            echo "::error::DIAGNOSIS FAILURE: SUPABASE_SERVICE_ROLE_KEY is EMPTY or NULL in Bash."
-            exit 1
-          else
-             echo "DIAGNOSIS SUCCESS: SUPABASE_SERVICE_ROLE_KEY is present in Bash (value masked)."
-          fi
-
-           # Check SUPABASE_DB_URL
-           if [ -z "$SUPABASE_DB_URL" ]; then
-            echo "::error::DIAGNOSIS FAILURE: SUPABASE_DB_URL is EMPTY or NULL in Bash. Check the 'SUPABASE_POOL_URL' secret."
-            exit 1
-          else
-             echo "DIAGNOSIS SUCCESS: SUPABASE_DB_URL is present in Bash (value masked)."
-          fi
-
-          echo "Diagnosis Complete: All critical environment variables are successfully injected into the shell."
       # =================================================================
-
+      # CRITICAL FIX: Step-Level Environment Injection
+      # We explicitly inject the environment variables directly into this step.
+      # =================================================================
       - name: Run Data Ingestion
         run: node ingest.mjs
+        env:
+          # Supabase API Access
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          # Database Connection String (Using the working Pooler URL)
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
+
+          # iNaturalist Configuration
+          INAT_BASE: ${{ secrets.INAT_BASE }}
+          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+
+          # Application Settings
+          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
