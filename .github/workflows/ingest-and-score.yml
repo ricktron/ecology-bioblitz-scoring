@@ -12,10 +12,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # Job-level env for general settings only (if any). Secrets are moved to the step level.
-    env:
-      NODE_ENV: production
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -26,48 +22,43 @@ jobs:
           node-version: '20.x'
 
       - name: Install dependencies
+        # This will now install 'dotenv' along with other dependencies
         run: npm install
 
       # =================================================================
-      # DIAGNOSTIC: Verify Node.js Environment Perspective
-      # This confirms that a standard Node.js process can see the variables
-      # when explicitly injected at the step level.
+      # CRITICAL FIX: Synthesize .env File
+      # The evidence proves that the script relies on loading configuration
+      # from a .env file. We dynamically create this file from GitHub Secrets.
       # =================================================================
-      - name: Forensic Environment Diagnosis (Node.js)
+      - name: Create .env file from Secrets
         run: |
-          echo "Checking environment inside a controlled Node.js process..."
-          node -e '
-            const url = process.env.SUPABASE_URL;
-            const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-            if (!url || !key) {
-              console.error("::error::NODE.JS DIAGNOSIS FAILURE: Variables missing even with explicit step injection. This indicates a severe runner issue.");
-              process.exit(1);
-            } else {
-              console.log("NODE.JS DIAGNOSIS SUCCESS: Variables are visible to Node.js via explicit injection.");
-            }
-          '
-        # Explicit injection for the diagnostic step
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          echo "Synthesizing .env file..."
+          # Write secrets into the .env file format (KEY=VALUE).
+          # We use 'printf' for robust handling of potential special characters in secrets.
+          # We access secrets directly within the run block using the GitHub Actions context.
+
+          printf "SUPABASE_URL=%s\n" "${{ secrets.SUPABASE_URL }}" > .env
+          printf "SUPABASE_SERVICE_ROLE_KEY=%s\n" "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> .env
+
+          # Ensure we map the Pooler URL (which works in GitHub Actions) to the DB URL expected by the app
+          printf "SUPABASE_DB_URL=%s\n" "${{ secrets.SUPABASE_POOL_URL }}" >> .env
+
+          printf "INAT_BASE=%s\n" "${{ secrets.INAT_BASE }}" >> .env
+          printf "ASSIGNMENT_IDS=%s\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
+          printf "RATE_LIMIT_RPS=%s\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
+          printf "NODE_ENV=production\n" >> .env
+
+          echo ".env file created successfully."
+          # Note: GitHub Actions automatically masks these secrets in the logs.
+
+      # Optional Diagnostic: Verify the contents (GitHub will automatically mask the values)
+      - name: Verify .env file structure (Masked)
+        run: cat .env
 
       # =================================================================
-      # CRITICAL FIX: Step-Level Environment Injection
-      # We explicitly inject the environment variables directly into this step.
+      # Execution Step
       # =================================================================
       - name: Run Data Ingestion
+        # The script will now find the .env file, load the variables (likely via dotenv), and execute.
+        # We do not need 'env:' injection here anymore, as the script reads from the file.
         run: node ingest.mjs
-        env:
-          # Supabase API Access
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-          # Database Connection String (Using the working Pooler URL)
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
-
-          # iNaturalist Configuration
-          INAT_BASE: ${{ secrets.INAT_BASE }}
-          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-
-          # Application Settings
-          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
