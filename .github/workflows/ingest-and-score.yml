@@ -18,7 +18,6 @@ jobs:
         with:
           path: 'ecology-bio-blitz-scoring'
 
-      # Updated Node.js to v20 for future compatibility, as recommended.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -29,18 +28,10 @@ jobs:
 
       - name: Run Data Ingestion
         env:
-          # --- FIX: Pass the correct environment variable names the script expects ---
-          # SUPABASE_URL maps to the SUPABASE_POOL_URL secret (which should contain gssencmode=disable)
-          SUPABASE_URL: ${{ secrets.SUPABASE_POOL_URL }}
-          # SUPABASE_SERVICE_KEY is now correctly passed
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          # INAT_PROJECT_SLUG is also correctly passed
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          # --- FIX: Using the correct secret name from your repository ---
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
-          # Other environment variables your script might need:
-          INAT_BASE: ${{ secrets.INAT_BASE }}
-          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-          NODE_ENV: 'production'
         run: node ingest.mjs
 
       - name: Trigger Supabase Scoring Function
@@ -57,34 +48,4 @@ jobs:
         env:
           WEBHOOK_URL: ${{ secrets.ACTION_FAILURE_WEBHOOK }}
         run: |
-          curl -X POST -H "Content-Type: application/json" \
-          -d '{
-            "content": "A critical failure was detected in the EcoQuest Live data pipeline.",
-            "embeds": [{
-              "title": "🚨 GitHub Action Failed: `${{ github.workflow }}`",
-              "description": "The workflow failed. Please investigate the logs immediately.",
-              "color": 15158332,
-              "fields": [
-                {
-                  "name": "Repository",
-                  "value": "`${{ github.repository }}`",
-                  "inline": true
-                },
-                {
-                  "name": "Triggered By",
-                  "value": "`${{ github.event_name }}`",
-                  "inline": true
-                },
-                {
-                  "name": "Commit",
-                  "value": "`'${{ github.sha }}`'",
-                  "inline": false
-                },
-                {
-                  "name": "Direct Link to Logs",
-                  "value": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                }
-              ]
-            }]
-          }' \
-          "${{ env.WEBHOOK_URL }}"
+          curl -X POST -H "Content-Type: application/json" -d '{"content": "🚨 **Critical Alert:** The EcoQuest Live data pipeline (`ingest-and-score`) has failed. Link: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' "${{ env.WEBHOOK_URL }}"
