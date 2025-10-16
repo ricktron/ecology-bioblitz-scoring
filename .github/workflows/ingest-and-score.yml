@@ -2,10 +2,7 @@ name: Ingest iNaturalist Data and Score
 
 on:
   workflow_dispatch: # Allows manual triggering
-  # schedule:
-  #   - cron: '0 2 * * *'
 
-# Security Best Practice
 permissions:
   contents: read
 
@@ -15,22 +12,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # =================================================================
     # Environment Configuration (Ensures secrets are passed to the script)
-    # =================================================================
     env:
-      # Supabase API Access (Required by Supabase SDK)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # Database Connection String (Using the working Pooler URL)
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
-
-      # iNaturalist Configuration
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }} # Using Pooler URL
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-
-      # Application Settings
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
       NODE_ENV: production
 
@@ -38,30 +26,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Verify the manually created file exists
-      - name: Verify Project Files
+      # =================================================================
+      # CRITICAL FORENSIC DIAGNOSTIC
+      # This step MUST appear in the execution log.
+      # =================================================================
+      - name: Forensic File System Diagnostic
         run: |
-          if [ ! -f "package.json" ]; then echo "::error::package.json is missing from the repository."; exit 1; fi
-          echo "package.json verified."
+          echo "Current directory: $(pwd)"
+          echo "--------------------------------------------------"
+          echo "Listing all files recursively (ls -R):"
+          # This command lists ALL files in the repository, revealing structure and capitalization.
+          ls -R
+          echo "--------------------------------------------------"
+          echo "Checking for package.json at the root:"
+          if [ -f "package.json" ]; then
+            echo "SUCCESS: File exists at the root."
+            # Check file encoding/type in case Web UI introduced errors
+            echo "File type information:"
+            file package.json
+          else
+            echo "::error::FAILURE: package.json NOT found in the ROOT directory. Review the 'ls -R' output above. If it is in a subdirectory, the workflow requires a 'working-directory' configuration. If it is missing entirely, it is not committed to this branch."
+            # Fail the workflow immediately if the prerequisite file is missing
+            exit 1
+          fi
+      # =================================================================
 
       - name: Setup Node.js LTS
         uses: actions/setup-node@v4
         with:
           node-version: '20.x'
-          # NOTE: Caching is disabled because package-lock.json is missing.
+          # Caching disabled as package-lock.json is missing.
 
       - name: Install dependencies
-        # NOTE: Using 'npm install' because 'npm ci' requires package-lock.json.
-        # This will install the dependencies listed in the manually created package.json.
+        # Using 'npm install' as 'npm ci' requires package-lock.json.
         run: npm install
-
-      - name: Verify Environment Availability
-        run: |
-          echo "Checking critical environment variables..."
-          if [ -z "$SUPABASE_URL" ]; then echo "::error::SUPABASE_URL is missing."; exit 1; fi
-          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo "::error::SUPABASE_SERVICE_ROLE_KEY is missing."; exit 1; fi
-          if [ -z "$SUPABASE_DB_URL" ]; then echo "::error::SUPABASE_DB_URL (Pooler) is missing."; exit 1; fi
-          echo "Environment ready."
 
       - name: Run Data Ingestion
         run: node ingest.mjs
