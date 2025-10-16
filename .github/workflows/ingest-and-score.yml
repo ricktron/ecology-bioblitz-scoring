@@ -1,65 +1,47 @@
-name: Ingest iNaturalist Data and Score
+name: Ingest and Score New Observations
 
 on:
-  workflow_dispatch: # Allows manual triggering
-
-permissions:
-  contents: read
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *' # Runs every 15 minutes
 
 jobs:
-  data-pipeline:
-    name: Fetch, Ingest, and Process Data
+  ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    # Environment Configuration (Ensures secrets are passed to the script)
-    env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }} # Using Pooler URL
-      INAT_BASE: ${{ secrets.INAT_BASE }}
-      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-      NODE_ENV: production
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      # =================================================================
-      # CRITICAL FORENSIC DIAGNOSTIC
-      # This step MUST appear in the execution log.
-      # =================================================================
-      - name: Forensic File System Diagnostic
-        run: |
-          echo "Current directory: $(pwd)"
-          echo "--------------------------------------------------"
-          echo "Listing all files recursively (ls -R):"
-          # This command lists ALL files in the repository, revealing structure and capitalization.
-          ls -R
-          echo "--------------------------------------------------"
-          echo "Checking for package.json at the root:"
-          if [ -f "package.json" ]; then
-            echo "SUCCESS: File exists at the root."
-            # Check file encoding/type in case Web UI introduced errors
-            echo "File type information:"
-            file package.json
-          else
-            echo "::error::FAILURE: package.json NOT found in the ROOT directory. Review the 'ls -R' output above. If it is in a subdirectory, the workflow requires a 'working-directory' configuration. If it is missing entirely, it is not committed to this branch."
-            # Fail the workflow immediately if the prerequisite file is missing
-            exit 1
-          fi
-      # =================================================================
-
-      - name: Setup Node.js LTS
-        uses: actions/setup-node@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
         with:
-          node-version: '20.x'
-          # Caching disabled as package-lock.json is missing.
+          node-version: '18'
 
       - name: Install dependencies
-        # Using 'npm install' as 'npm ci' requires package-lock.json.
         run: npm install
 
-      - name: Run Data Ingestion
+      - name: Run Ingest Script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
         run: node ingest.mjs
+
+      - name: Trigger Supabase Scoring Function
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          curl -X POST "${{ secrets.SUPABASE_URL }}/functions/v1/score-all-unscored" \
+          -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+          -H "Content-Type: application/json"
+
+      # --- NEW STEP ---
+      - name: Notify on Failure
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.ACTION_FAILURE_WEBHOOK }}
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{"content": "🚨 **Critical Alert:** The EcoQuest Live data pipeline (`ingest-and-score`) has failed. Please investigate immediately. Link: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+          "${{ env.WEBHOOK_URL }}"
