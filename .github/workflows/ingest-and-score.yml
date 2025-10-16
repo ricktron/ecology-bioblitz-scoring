@@ -8,11 +8,6 @@ on:
 jobs:
   ingest:
     runs-on: ubuntu-latest
-
-    # =================================================================
-    # FIX: Set a default working directory for all subsequent 'run' steps.
-    # This ensures commands execute inside the checked-out repository.
-    # =================================================================
     defaults:
       run:
         working-directory: ./ecology-bioblitz-scoring
@@ -21,13 +16,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          # Check out the code into a predictable directory name
           path: 'ecology-bioblitz-scoring'
+
+      # --- FIX: Added Node.js setup step ---
+      # This ensures a consistent version of Node.js and npm are available.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
       - name: Create .env file from secrets
         run: |
           echo "Creating .env file..."
-          # Using printf to handle special characters in the Pooler URL
           printf "SUPABASE_DB_URL=\"%s\"\n" "${{ secrets.SUPABASE_POOL_URL }}" >> .env
           printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
           printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
@@ -42,5 +42,4 @@ jobs:
         run: npm install
 
       - name: Run Data Ingestion
-        # The '-r dotenv/config' flag preloads environment variables from the .env file
         run: node -r dotenv/config ingest.mjs
