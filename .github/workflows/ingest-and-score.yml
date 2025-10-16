@@ -1,63 +1,46 @@
-name: Ingest iNaturalist Data and Score
+name: Ingest and Score New Observations
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
+  schedule:
+    - cron: '*/15 * * * *'
 
 jobs:
-  data-pipeline:
-    name: Fetch, Ingest, and Process Data
+  ingest:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+
+    # =================================================================
+    # FIX: Set a default working directory for all subsequent 'run' steps.
+    # This ensures commands execute inside the checked-out repository.
+    # =================================================================
+    defaults:
+      run:
+        working-directory: ./ecology-bioblitz-scoring
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Setup Node.js LTS (v20)
-        uses: actions/setup-node@v4
         with:
-          node-version: '20.x'
+          # Check out the code into a predictable directory name
+          path: 'ecology-bioblitz-scoring'
 
-      - name: Install dependencies
-        # Ensures 'dotenv' and other dependencies are installed
-        run: npm install
-
-      # =================================================================
-      # FIX 1: Synthesize .env File with Robust Quoting
-      # We must enclose the values in double quotes to handle special characters
-      # (especially in database connection strings).
-      # =================================================================
-      - name: Create .env file from Secrets (Quoted)
+      - name: Create .env file from secrets
         run: |
-          echo "Synthesizing .env file with robust quoting..."
-          # Format: KEY="VALUE"
-          # We use printf with escaped quotes in the format string: printf "KEY=\"%s\"\n"
-
-          printf "SUPABASE_URL=\"%s\"\n" "${{ secrets.SUPABASE_URL }}" > .env
-          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> .env
-
-          # CRITICAL: The Pooler URL likely contains special characters.
+          echo "Creating .env file..."
+          # Using printf to handle special characters in the Pooler URL
           printf "SUPABASE_DB_URL=\"%s\"\n" "${{ secrets.SUPABASE_POOL_URL }}" >> .env
-
           printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
           printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
           printf "RATE_LIMIT_RPS=\"%s\"\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
           printf "NODE_ENV=\"production\"\n" >> .env
-
           echo ".env file created successfully."
 
-      # Optional Diagnostic: Verify the contents (GitHub will automatically mask the values)
       - name: Verify .env file structure (Masked)
         run: cat .env
 
-      # =================================================================
-      # FIX 2: Force Configuration Loading via Node.js Runtime
-      # We use the Node.js '-r' flag to preload 'dotenv/config'.
-      # This forces the .env file to be loaded into process.env BEFORE ingest.mjs starts,
-      # bypassing any potentially flawed loading logic within the script.
-      # =================================================================
+      - name: Install dependencies
+        run: npm install
+
       - name: Run Data Ingestion
+        # The '-r dotenv/config' flag preloads environment variables from the .env file
         run: node -r dotenv/config ingest.mjs
