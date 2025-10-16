@@ -22,43 +22,42 @@ jobs:
           node-version: '20.x'
 
       - name: Install dependencies
-        # This will now install 'dotenv' along with other dependencies
+        # Ensures 'dotenv' and other dependencies are installed
         run: npm install
 
       # =================================================================
-      # CRITICAL FIX: Synthesize .env File
-      # The evidence proves that the script relies on loading configuration
-      # from a .env file. We dynamically create this file from GitHub Secrets.
+      # FIX 1: Synthesize .env File with Robust Quoting
+      # We must enclose the values in double quotes to handle special characters
+      # (especially in database connection strings).
       # =================================================================
-      - name: Create .env file from Secrets
+      - name: Create .env file from Secrets (Quoted)
         run: |
-          echo "Synthesizing .env file..."
-          # Write secrets into the .env file format (KEY=VALUE).
-          # We use 'printf' for robust handling of potential special characters in secrets.
-          # We access secrets directly within the run block using the GitHub Actions context.
+          echo "Synthesizing .env file with robust quoting..."
+          # Format: KEY="VALUE"
+          # We use printf with escaped quotes in the format string: printf "KEY=\"%s\"\n"
 
-          printf "SUPABASE_URL=%s\n" "${{ secrets.SUPABASE_URL }}" > .env
-          printf "SUPABASE_SERVICE_ROLE_KEY=%s\n" "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> .env
+          printf "SUPABASE_URL=\"%s\"\n" "${{ secrets.SUPABASE_URL }}" > .env
+          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> .env
 
-          # Ensure we map the Pooler URL (which works in GitHub Actions) to the DB URL expected by the app
-          printf "SUPABASE_DB_URL=%s\n" "${{ secrets.SUPABASE_POOL_URL }}" >> .env
+          # CRITICAL: The Pooler URL likely contains special characters.
+          printf "SUPABASE_DB_URL=\"%s\"\n" "${{ secrets.SUPABASE_POOL_URL }}" >> .env
 
-          printf "INAT_BASE=%s\n" "${{ secrets.INAT_BASE }}" >> .env
-          printf "ASSIGNMENT_IDS=%s\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
-          printf "RATE_LIMIT_RPS=%s\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
-          printf "NODE_ENV=production\n" >> .env
+          printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
+          printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
+          printf "RATE_LIMIT_RPS=\"%s\"\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
+          printf "NODE_ENV=\"production\"\n" >> .env
 
           echo ".env file created successfully."
-          # Note: GitHub Actions automatically masks these secrets in the logs.
 
       # Optional Diagnostic: Verify the contents (GitHub will automatically mask the values)
       - name: Verify .env file structure (Masked)
         run: cat .env
 
       # =================================================================
-      # Execution Step
+      # FIX 2: Force Configuration Loading via Node.js Runtime
+      # We use the Node.js '-r' flag to preload 'dotenv/config'.
+      # This forces the .env file to be loaded into process.env BEFORE ingest.mjs starts,
+      # bypassing any potentially flawed loading logic within the script.
       # =================================================================
       - name: Run Data Ingestion
-        # The script will now find the .env file, load the variables (likely via dotenv), and execute.
-        # We do not need 'env:' injection here anymore, as the script reads from the file.
-        run: node ingest.mjs
+        run: node -r dotenv/config ingest.mjs
