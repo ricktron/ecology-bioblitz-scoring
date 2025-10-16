@@ -10,36 +10,33 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./ecology-bioblitz-scoring
+        working-directory: ./ecology-bio-blitz-scoring # Corrected directory name
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          path: 'ecology-bioblitz-scoring'
+          path: 'ecology-bio-blitz-scoring' # Corrected directory name
 
-      # --- FIX: Added Node.js setup step ---
-      # This ensures a consistent version of Node.js and npm are available.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18'
 
-      - name: Create .env file from secrets
-        run: |
-          echo "Creating .env file..."
-          printf "SUPABASE_DB_URL=\"%s\"\n" "${{ secrets.SUPABASE_POOL_URL }}" >> .env
-          printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
-          printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
-          printf "RATE_LIMIT_RPS=\"%s\"\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
-          printf "NODE_ENV=\"production\"\n" >> .env
-          echo ".env file created successfully."
-
-      - name: Verify .env file structure (Masked)
-        run: cat .env
-
+      # =================================================================
+      # FIX: Pass secrets directly as environment variables to the step.
+      # This is a more robust method than writing to a .env file,
+      # as it avoids shell character escaping issues with complex strings.
+      # =================================================================
       - name: Install dependencies
         run: npm install
 
       - name: Run Data Ingestion
-        run: node -r dotenv/config ingest.mjs
+        env:
+          # Map GitHub secrets directly to the environment variables the script expects
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
+          INAT_BASE: ${{ secrets.INAT_BASE }}
+          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+          NODE_ENV: 'production'
+        run: node ingest.mjs
