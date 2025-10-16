@@ -8,9 +8,16 @@ on:
 jobs:
   ingest:
     runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: ./ecology-bioblitz-scoring
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
+        with:
+          path: 'ecology-bioblitz-scoring'
 
       - name: Set up Node.js
         uses: actions/setup-node@v3
@@ -36,12 +43,40 @@ jobs:
           -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
           -H "Content-Type: application/json"
 
-      # --- NEW STEP ---
+      # --- UPDATED STEP ---
       - name: Notify on Failure
         if: failure()
         env:
           WEBHOOK_URL: ${{ secrets.ACTION_FAILURE_WEBHOOK }}
         run: |
           curl -X POST -H "Content-Type: application/json" \
-          -d '{"content": "🚨 **Critical Alert:** The EcoQuest Live data pipeline (`ingest-and-score`) has failed. Please investigate immediately. Link: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' \
+          -d '{
+            "content": "A critical failure was detected in the EcoQuest Live data pipeline.",
+            "embeds": [{
+              "title": "🚨 GitHub Action Failed: `${{ github.workflow }}`",
+              "description": "The workflow failed. Please investigate the logs immediately.",
+              "color": 15158332,
+              "fields": [
+                {
+                  "name": "Repository",
+                  "value": "`${{ github.repository }}`",
+                  "inline": true
+                },
+                {
+                  "name": "Triggered By",
+                  "value": "`${{ github.event_name }}`",
+                  "inline": true
+                },
+                {
+                  "name": "Commit",
+                  "value": "`'${{ github.sha }}`'",
+                  "inline": false
+                },
+                {
+                  "name": "Direct Link to Logs",
+                  "value": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                }
+              ]
+            }]
+          }' \
           "${{ env.WEBHOOK_URL }}"
