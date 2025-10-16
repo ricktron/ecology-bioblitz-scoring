@@ -2,8 +2,6 @@ name: Ingest and Score New Observations
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/15 * * * *'
 
 jobs:
   ingest:
@@ -26,26 +24,26 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # =================================================================
+      # FORENSIC DIAGNOSTICS
+      # These steps will log the exact environment state before the script runs.
+      # =================================================================
+      - name: Verify Environment and Secrets
+        run: |
+          echo "--- Environment Variables ---"
+          printenv | sort
+          echo "---------------------------"
+          echo "Checking for Supabase URL presence: ${{ env.SUPABASE_URL_PRESENT }}"
+          echo "Checking for Service Key presence: ${{ env.SERVICE_KEY_PRESENT }}"
+        env:
+          # We check for presence without printing the secret value.
+          SUPABASE_URL_PRESENT: ${{ !!secrets.SUPABASE_URL }}
+          SERVICE_KEY_PRESENT: ${{ !!secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
       - name: Run Data Ingestion
         env:
+          # Using the exact variable names from your working file
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          # --- FIX: Using the correct secret name from your repository ---
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
         run: node ingest.mjs
-
-      - name: Trigger Supabase Scoring Function
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-        run: |
-          curl -X POST "${{ secrets.SUPABASE_URL }}/functions/v1/score-all-unscored" \
-          -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-          -H "Content-Type: application/json"
-
-      - name: Notify on Failure
-        if: failure()
-        env:
-          WEBHOOK_URL: ${{ secrets.ACTION_FAILURE_WEBHOOK }}
-        run: |
-          curl -X POST -H "Content-Type: application/json" -d '{"content": "🚨 **Critical Alert:** The EcoQuest Live data pipeline (`ingest-and-score`) has failed. Link: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"}' "${{ env.WEBHOOK_URL }}"
