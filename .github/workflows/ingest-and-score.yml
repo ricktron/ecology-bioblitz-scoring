@@ -1,39 +1,27 @@
 name: Ingest iNaturalist Data and Score
 
 on:
-  workflow_dispatch: # Allows manual triggering
-  # schedule:
-  #   - cron: '0 2 * * *' # Uncomment for scheduled runs
+  workflow_dispatch:
 
-# Security Best Practice
 permissions:
   contents: read
 
 jobs:
-  # We use a consistent job ID and name
   data-pipeline:
     name: Fetch, Ingest, and Process Data
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Ensure no 'environment:' is specified here, so it uses Repository Secrets.
 
     # =================================================================
-    # CRITICAL FIX: Environment Configuration
-    # This block is required to pass secrets to the Node.js script.
-    # If this block is missing, the script will fail with "Missing required environment variables."
+    # CRITICAL BLOCK: Must be indented correctly under the job definition.
     # =================================================================
     env:
-      # Supabase API Access
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # Database Connection String (Using the working Pooler URL)
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
-
-      # iNaturalist Configuration
       INAT_BASE: ${{ secrets.INAT_BASE }}
       ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-
-      # Application Settings
       RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
       NODE_ENV: production
 
@@ -44,12 +32,49 @@ jobs:
       - name: Setup Node.js LTS (v20)
         uses: actions/setup-node@v4
         with:
-          # FIX: Upgrading to Node 20 to resolve the deprecation warning.
           node-version: '20.x'
 
       - name: Install dependencies
-        # Using 'npm install' because package-lock.json is missing.
         run: npm install
+
+      # =================================================================
+      # FORENSIC DIAGNOSTIC STEP
+      # This checks the environment in the shell (Bash) before Node.js runs.
+      # =================================================================
+      - name: Forensic Environment Diagnosis
+        run: |
+          echo "Running environment diagnostics in the shell (Bash)..."
+
+          # Check SUPABASE_URL
+          if [ -z "$SUPABASE_URL" ]; then
+            echo "::error::DIAGNOSIS FAILURE: SUPABASE_URL is EMPTY or NULL in the Bash environment."
+            echo "Potential Causes:"
+            echo "1. The 'env:' block in this YAML file is missing or incorrectly indented."
+            echo "2. The Repository Secret 'SUPABASE_URL' is empty."
+            echo "3. The job is referencing an 'environment:' that does not contain this secret."
+            exit 1
+          else
+            echo "DIAGNOSIS SUCCESS: SUPABASE_URL is present in Bash (value masked)."
+          fi
+
+          # Check SUPABASE_SERVICE_ROLE_KEY
+          if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then
+            echo "::error::DIAGNOSIS FAILURE: SUPABASE_SERVICE_ROLE_KEY is EMPTY or NULL in Bash."
+            exit 1
+          else
+             echo "DIAGNOSIS SUCCESS: SUPABASE_SERVICE_ROLE_KEY is present in Bash (value masked)."
+          fi
+
+           # Check SUPABASE_DB_URL
+           if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::DIAGNOSIS FAILURE: SUPABASE_DB_URL is EMPTY or NULL in Bash. Check the 'SUPABASE_POOL_URL' secret."
+            exit 1
+          else
+             echo "DIAGNOSIS SUCCESS: SUPABASE_DB_URL is present in Bash (value masked)."
+          fi
+
+          echo "Diagnosis Complete: All critical environment variables are successfully injected into the shell."
+      # =================================================================
 
       - name: Run Data Ingestion
         run: node ingest.mjs
