@@ -16,8 +16,7 @@ jobs:
     timeout-minutes: 30 # Safety measure for long-running or stuck jobs
 
     # =================================================================
-    # CRITICAL FIX: Job-Level Environment Configuration
-    # This maps GitHub Secrets into the OS Environment for all steps in this job.
+    # Job-Level Environment Configuration (This was the previous critical fix)
     # =================================================================
     env:
       # Supabase API Access (Required by Supabase SDK)
@@ -26,7 +25,6 @@ jobs:
 
       # Database Connection String
       # CRITICAL: We map the Pooler URL (IPv4 compatible) to the variable the app expects.
-      # This is required as the GitHub Actions environment cannot reliably connect to the Direct URL.
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
       # iNaturalist Configuration
@@ -45,11 +43,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20.x' # Use a stable LTS version (e.g., Node 20)
-          cache: 'npm' # Cache dependencies to speed up future runs
+          # FIX: Removed 'cache: npm' because package-lock.json is not checked into the repository.
 
       - name: Install dependencies
-        # Best Practice: Use 'npm ci' (Clean Install) for reliable, reproducible builds in CI/CD
-        run: npm ci
+        # FIX: Reverted to 'npm install' as 'npm ci' requires package-lock.json.
+        run: npm install
 
       # Robustness Check: Verify variables are present in the shell BEFORE running the application.
       - name: Verify Environment Availability
@@ -61,9 +59,9 @@ jobs:
           echo "Environment ready."
 
       - name: Run Data Ingestion
-        # The Node.js process now correctly inherits the environment variables defined at the job level.
+        # The Node.js process correctly inherits the environment variables defined at the job level.
         run: node ingest.mjs
 
-      # Add subsequent steps (e.g., scoring) here. They will also inherit the environment variables.
+      # Add subsequent steps (e.g., scoring) here.
       # - name: Run Scoring Calculation
       #   run: node score.mjs
