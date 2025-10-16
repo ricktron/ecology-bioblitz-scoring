@@ -3,9 +3,9 @@ name: Ingest iNaturalist Data and Score
 on:
   workflow_dispatch: # Allows manual triggering
   # schedule:
-  #   - cron: '0 2 * * *' # Uncomment for scheduled runs (e.g., daily at 2 AM UTC)
+  #   - cron: '0 2 * * *'
 
-# Security Best Practice: Restrict GITHUB_TOKEN permissions to the minimum required
+# Security Best Practice
 permissions:
   contents: read
 
@@ -13,18 +13,17 @@ jobs:
   data-pipeline:
     name: Fetch, Ingest, and Process Data
     runs-on: ubuntu-latest
-    timeout-minutes: 30 # Safety measure for long-running or stuck jobs
+    timeout-minutes: 30
 
     # =================================================================
-    # Job-Level Environment Configuration (This was the previous critical fix)
+    # Environment Configuration (Ensures secrets are passed to the script)
     # =================================================================
     env:
       # Supabase API Access (Required by Supabase SDK)
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # Database Connection String
-      # CRITICAL: We map the Pooler URL (IPv4 compatible) to the variable the app expects.
+      # Database Connection String (Using the working Pooler URL)
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
 
       # iNaturalist Configuration
@@ -39,29 +38,30 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Verify the manually created file exists
+      - name: Verify Project Files
+        run: |
+          if [ ! -f "package.json" ]; then echo "::error::package.json is missing from the repository."; exit 1; fi
+          echo "package.json verified."
+
       - name: Setup Node.js LTS
         uses: actions/setup-node@v4
         with:
-          node-version: '20.x' # Use a stable LTS version (e.g., Node 20)
-          # FIX: Removed 'cache: npm' because package-lock.json is not checked into the repository.
+          node-version: '20.x'
+          # NOTE: Caching is disabled because package-lock.json is missing.
 
       - name: Install dependencies
-        # FIX: Reverted to 'npm install' as 'npm ci' requires package-lock.json.
+        # NOTE: Using 'npm install' because 'npm ci' requires package-lock.json.
+        # This will install the dependencies listed in the manually created package.json.
         run: npm install
 
-      # Robustness Check: Verify variables are present in the shell BEFORE running the application.
       - name: Verify Environment Availability
         run: |
-          echo "Checking critical environment variables in the shell..."
+          echo "Checking critical environment variables..."
           if [ -z "$SUPABASE_URL" ]; then echo "::error::SUPABASE_URL is missing."; exit 1; fi
           if [ -z "$SUPABASE_SERVICE_ROLE_KEY" ]; then echo "::error::SUPABASE_SERVICE_ROLE_KEY is missing."; exit 1; fi
           if [ -z "$SUPABASE_DB_URL" ]; then echo "::error::SUPABASE_DB_URL (Pooler) is missing."; exit 1; fi
           echo "Environment ready."
 
       - name: Run Data Ingestion
-        # The Node.js process correctly inherits the environment variables defined at the job level.
         run: node ingest.mjs
-
-      # Add subsequent steps (e.g., scoring) here.
-      # - name: Run Scoring Calculation
-      #   run: node score.mjs
