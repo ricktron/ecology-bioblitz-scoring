@@ -10,33 +10,81 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ./ecology-bio-blitz-scoring # Corrected directory name
+        working-directory: ./ecology-bio-blitz-scoring
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          path: 'ecology-bio-blitz-scoring' # Corrected directory name
+          path: 'ecology-bio-blitz-scoring'
 
+      # Updated Node.js to v20 for future compatibility, as recommended.
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20'
 
-      # =================================================================
-      # FIX: Pass secrets directly as environment variables to the step.
-      # This is a more robust method than writing to a .env file,
-      # as it avoids shell character escaping issues with complex strings.
-      # =================================================================
       - name: Install dependencies
         run: npm install
 
       - name: Run Data Ingestion
         env:
-          # Map GitHub secrets directly to the environment variables the script expects
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
+          # --- FIX: Pass the correct environment variable names the script expects ---
+          # SUPABASE_URL maps to the SUPABASE_POOL_URL secret (which should contain gssencmode=disable)
+          SUPABASE_URL: ${{ secrets.SUPABASE_POOL_URL }}
+          # SUPABASE_SERVICE_KEY is now correctly passed
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          # INAT_PROJECT_SLUG is also correctly passed
+          INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
+          # Other environment variables your script might need:
           INAT_BASE: ${{ secrets.INAT_BASE }}
           ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
           RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
           NODE_ENV: 'production'
         run: node ingest.mjs
+
+      - name: Trigger Supabase Scoring Function
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          curl -X POST "${{ secrets.SUPABASE_URL }}/functions/v1/score-all-unscored" \
+          -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
+          -H "Content-Type: application/json"
+
+      - name: Notify on Failure
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.ACTION_FAILURE_WEBHOOK }}
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+          -d '{
+            "content": "A critical failure was detected in the EcoQuest Live data pipeline.",
+            "embeds": [{
+              "title": "🚨 GitHub Action Failed: `${{ github.workflow }}`",
+              "description": "The workflow failed. Please investigate the logs immediately.",
+              "color": 15158332,
+              "fields": [
+                {
+                  "name": "Repository",
+                  "value": "`${{ github.repository }}`",
+                  "inline": true
+                },
+                {
+                  "name": "Triggered By",
+                  "value": "`${{ github.event_name }}`",
+                  "inline": true
+                },
+                {
+                  "name": "Commit",
+                  "value": "`'${{ github.sha }}`'",
+                  "inline": false
+                },
+                {
+                  "name": "Direct Link to Logs",
+                  "value": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                }
+              ]
+            }]
+          }' \
+          "${{ env.WEBHOOK_URL }}"
