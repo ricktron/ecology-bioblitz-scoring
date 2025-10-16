@@ -1,0 +1,11 @@
+{
+  "name": "ecoquest-live-ingestion",
+  "version": "1.0.0",
+  "description": "Data ingestion pipeline",
+  "main": "ingest.mjs",
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0",
+    "pg": "^8.0.0"
+  }
+}
