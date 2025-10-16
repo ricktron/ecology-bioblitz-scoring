@@ -1,82 +1,55 @@
-name: Ingest and Score New Observations
+name: Ingest iNaturalist Data and Score
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '*/15 * * * *' # Runs every 15 minutes
+  workflow_dispatch: # Allows manual triggering
+  # schedule:
+  #   - cron: '0 2 * * *' # Uncomment for scheduled runs
+
+# Security Best Practice
+permissions:
+  contents: read
 
 jobs:
-  ingest:
+  # We use a consistent job ID and name
+  data-pipeline:
+    name: Fetch, Ingest, and Process Data
     runs-on: ubuntu-latest
-    
-    defaults:
-      run:
-        working-directory: ./ecology-bioblitz-scoring
+    timeout-minutes: 30
+
+    # =================================================================
+    # CRITICAL FIX: Environment Configuration
+    # This block is required to pass secrets to the Node.js script.
+    # If this block is missing, the script will fail with "Missing required environment variables."
+    # =================================================================
+    env:
+      # Supabase API Access
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # Database Connection String (Using the working Pooler URL)
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
+
+      # iNaturalist Configuration
+      INAT_BASE: ${{ secrets.INAT_BASE }}
+      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+
+      # Application Settings
+      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+      NODE_ENV: production
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          path: 'ecology-bioblitz-scoring'
+        uses: actions/checkout@v4
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
+      - name: Setup Node.js LTS (v20)
+        uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          # FIX: Upgrading to Node 20 to resolve the deprecation warning.
+          node-version: '20.x'
 
       - name: Install dependencies
+        # Using 'npm install' because package-lock.json is missing.
         run: npm install
 
-      - name: Run Ingest Script
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
+      - name: Run Data Ingestion
         run: node ingest.mjs
-
-      - name: Trigger Supabase Scoring Function
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-        run: |
-          curl -X POST "${{ secrets.SUPABASE_URL }}/functions/v1/score-all-unscored" \
-          -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}" \
-          -H "Content-Type: application/json"
-
-      # --- UPDATED STEP ---
-      - name: Notify on Failure
-        if: failure()
-        env:
-          WEBHOOK_URL: ${{ secrets.ACTION_FAILURE_WEBHOOK }}
-        run: |
-          curl -X POST -H "Content-Type: application/json" \
-          -d '{
-            "content": "A critical failure was detected in the EcoQuest Live data pipeline.",
-            "embeds": [{
-              "title": "🚨 GitHub Action Failed: `${{ github.workflow }}`",
-              "description": "The workflow failed. Please investigate the logs immediately.",
-              "color": 15158332,
-              "fields": [
-                {
-                  "name": "Repository",
-                  "value": "`${{ github.repository }}`",
-                  "inline": true
-                },
-                {
-                  "name": "Triggered By",
-                  "value": "`${{ github.event_name }}`",
-                  "inline": true
-                },
-                {
-                  "name": "Commit",
-                  "value": "`'${{ github.sha }}`'",
-                  "inline": false
-                },
-                {
-                  "name": "Direct Link to Logs",
-                  "value": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-                }
-              ]
-            }]
-          }' \
-          "${{ env.WEBHOOK_URL }}"
