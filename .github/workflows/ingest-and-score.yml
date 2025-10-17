@@ -1,4 +1,4 @@
-name: Ingest iNaturalist Data (DIAGNOSTIC RUN)
+name: Ingest iNaturalist Data and Score
 
 on:
   workflow_dispatch:
@@ -8,9 +8,38 @@ permissions:
 
 jobs:
   data-pipeline:
-    name: Diagnostic Environment Inspection
+    name: Build, Ingest, and Process Data
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
+
+    # Define the comprehensive environment block for the entire job.
+    # This ensures variables are available for npm install, npm run build, and node execution.
+    env:
+      # --- Supabase SDK Variables ---
+      # Standard backend names
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      # Framework conventions (Next.js, Vite) - Critical for Build-Time Embedding
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+      VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+
+      # Generic Aliases
+      SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # --- Database Connection Variables (Using the Pooler URL) ---
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
+      DATABASE_URL: ${{ secrets.SUPABASE_POOL_URL }}
+      POSTGRES_URL: ${{ secrets.SUPABASE_POOL_URL }}
+
+      # --- iNaturalist and Application variables ---
+      INAT_BASE: ${{ secrets.INAT_BASE }}
+      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
+      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
+      NODE_ENV: production
 
     steps:
       - name: Checkout repository
@@ -21,74 +50,20 @@ jobs:
         with:
           node-version: '20.x'
 
+      - name: Install dependencies
+        run: npm install
+
       # =================================================================
-      # CRITICAL DIAGNOSTIC: Intrusive Environment Inspection
-      # We run a diagnostic Node.js script using the exact same injection
-      # mechanism as the main application to inspect the runtime environment.
+      # CRITICAL FIX: Execute the Build Process
+      # The application requires build-time embedding of environment variables.
+      # The 'env' block defined at the job level ensures the variables are present here.
       # =================================================================
-      - name: Run Intrusive Environment Diagnostic
-        run: |
-          echo "Starting intrusive diagnostic..."
-          node -e '
-            const requiredKeys = [
-              // Keys we expect the application needs based on previous analysis
-              "SUPABASE_URL",
-              "SUPABASE_SERVICE_ROLE_KEY",
-              "SUPABASE_ANON_KEY",
-              "NEXT_PUBLIC_SUPABASE_URL",
-              "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-              "DATABASE_URL",
-              "NODE_ENV"
-            ];
+      - name: Build Application
+        run: npm run build
 
-            let failure = false;
-            console.log("--- Node.js process.env Inspection Report ---");
-
-            requiredKeys.forEach(key => {
-              const value = process.env[key];
-              if (value && value.length > 0) {
-                // Report the length securely without exposing the value
-                console.log(`[SUCCESS] Key: ${key} | Status: Present | Length: ${value.length}`);
-              } else {
-                console.error(`[FAILURE] Key: ${key} | Status: MISSING or EMPTY`);
-                failure = true;
-              }
-            });
-
-            console.log("---------------------------------------------");
-
-            if (failure) {
-              console.error("::error::DIAGNOSTIC FAILURE: The Node.js runtime is missing expected environment variables despite explicit injection. This indicates a fundamental failure in the runner environment.");
-              process.exit(1);
-            } else {
-              console.log("DIAGNOSTIC SUCCESS: The Node.js runtime has all expected variables.");
-              console.log("::warning::CONCLUSION: The GitHub Actions environment and injection mechanism are working correctly. The root cause MUST be inside the application code (ingest.mjs). The most likely cause is Build-Time Embedding (the application needs to be rebuilt) or the application is ignoring/clearing process.env.");
-            }
-          '
-        # We use the exact same comprehensive injection block we derived:
-        env:
-          # --- Supabase SDK Variables ---
-          # Standard backend names
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-
-          # Framework conventions (Next.js, Vite)
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-          VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-
-          # Generic Aliases
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-          # --- Database Connection Variables (Using the Pooler URL) ---
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
-          DATABASE_URL: ${{ secrets.SUPABASE_POOL_URL }}
-          POSTGRES_URL: ${{ secrets.SUPABASE_POOL_URL }}
-
-          # --- iNaturalist and Application variables ---
-          INAT_BASE: ${{ secrets.INAT_BASE }}
-          ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-          RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-          NODE_ENV: production
+      # =================================================================
+      # Execution Step
+      # =================================================================
+      - name: Run Data Ingestion
+        # The script now runs with the configuration correctly embedded.
+        run: node ingest.mjs
