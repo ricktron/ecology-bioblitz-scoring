@@ -1,4 +1,4 @@
-name: Ingest iNaturalist Data and Score
+name: Ingest iNaturalist Data (DIAGNOSTIC RUN)
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ permissions:
 
 jobs:
   data-pipeline:
-    name: Fetch, Ingest, and Process Data
+    name: Diagnostic Environment Inspection
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
 
     steps:
       - name: Checkout repository
@@ -21,52 +21,51 @@ jobs:
         with:
           node-version: '20.x'
 
-      - name: Install dependencies
-        run: npm install
-
       # =================================================================
-      # ROBUSTNESS: Validate Secret Content Structure
-      # Verify the format of the secrets without exposing them (checks length and prefixes).
-      # This diagnoses if the application's schema validation is failing due to malformed inputs.
+      # CRITICAL DIAGNOSTIC: Intrusive Environment Inspection
+      # We run a diagnostic Node.js script using the exact same injection
+      # mechanism as the main application to inspect the runtime environment.
       # =================================================================
-      - name: Forensic Secret Content Validation
+      - name: Run Intrusive Environment Diagnostic
         run: |
-          echo "Validating secret content structure (Lengths and Prefixes)..."
+          echo "Starting intrusive diagnostic..."
+          node -e '
+            const requiredKeys = [
+              // Keys we expect the application needs based on previous analysis
+              "SUPABASE_URL",
+              "SUPABASE_SERVICE_ROLE_KEY",
+              "SUPABASE_ANON_KEY",
+              "NEXT_PUBLIC_SUPABASE_URL",
+              "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+              "DATABASE_URL",
+              "NODE_ENV"
+            ];
 
-          # Capture secrets securely into local variables
-          S_URL="${{ secrets.SUPABASE_URL }}"
-          SERVICE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
-          ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"
+            let failure = false;
+            console.log("--- Node.js process.env Inspection Report ---");
 
-          # 1. Validate SUPABASE_URL (Must be a valid Supabase URL)
-          echo "SUPABASE_URL Length: ${#S_URL}"
-          if [[ ! "$S_URL" =~ ^https://.*\.supabase\.co$ ]]; then
-            echo "::error::VALIDATION FAILURE: SUPABASE_URL does not match the expected format (https://<project-ref>.supabase.co). Please check the secret value in Repository Settings."
-            exit 1
-          fi
+            requiredKeys.forEach(key => {
+              const value = process.env[key];
+              if (value && value.length > 0) {
+                // Report the length securely without exposing the value
+                console.log(`[SUCCESS] Key: ${key} | Status: Present | Length: ${value.length}`);
+              } else {
+                console.error(`[FAILURE] Key: ${key} | Status: MISSING or EMPTY`);
+                failure = true;
+              }
+            });
 
-          # 2. Validate ANON_KEY (JWT format, starts with 'ey')
-          echo "SUPABASE_ANON_KEY Length: ${#ANON_KEY}"
-          if [[ ! "$ANON_KEY" =~ ^ey.* ]]; then
-            echo "::error::VALIDATION FAILURE: SUPABASE_ANON_KEY does not start with 'ey' (expected JWT format). Please check the secret value."
-            exit 1
-          fi
+            console.log("---------------------------------------------");
 
-          # 3. Validate SERVICE_ROLE_KEY (JWT format, starts with 'ey')
-          echo "SUPABASE_SERVICE_ROLE_KEY Length: ${#SERVICE_KEY}"
-          if [[ ! "$SERVICE_KEY" =~ ^ey.* ]]; then
-             echo "::error::VALIDATION FAILURE: SUPABASE_SERVICE_ROLE_KEY does not start with 'ey' (expected JWT format). Please check the secret value."
-            exit 1
-          fi
-          echo "All critical secrets validated for content structure."
-
-      # =================================================================
-      # CRITICAL FIX: Direct Environment Injection with Comprehensive Aliasing
-      # We bypass .env files and dotenv entirely. We inject all required
-      # variables and their aliases directly into the environment of the Node.js process.
-      # =================================================================
-      - name: Run Data Ingestion
-        run: node ingest.mjs
+            if (failure) {
+              console.error("::error::DIAGNOSTIC FAILURE: The Node.js runtime is missing expected environment variables despite explicit injection. This indicates a fundamental failure in the runner environment.");
+              process.exit(1);
+            } else {
+              console.log("DIAGNOSTIC SUCCESS: The Node.js runtime has all expected variables.");
+              console.log("::warning::CONCLUSION: The GitHub Actions environment and injection mechanism are working correctly. The root cause MUST be inside the application code (ingest.mjs). The most likely cause is Build-Time Embedding (the application needs to be rebuilt) or the application is ignoring/clearing process.env.");
+            }
+          '
+        # We use the exact same comprehensive injection block we derived:
         env:
           # --- Supabase SDK Variables ---
           # Standard backend names
@@ -74,17 +73,16 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # Framework conventions (Next.js, Vite) - These use the Anon Key
+          # Framework conventions (Next.js, Vite)
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
 
-          # Generic Aliases (Use Service Key for generic backend access)
+          # Generic Aliases
           SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
           # --- Database Connection Variables (Using the Pooler URL) ---
-          # Supabase-specific and Conventional names (PostgreSQL/Prisma)
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
           DATABASE_URL: ${{ secrets.SUPABASE_POOL_URL }}
           POSTGRES_URL: ${{ secrets.SUPABASE_POOL_URL }}
@@ -93,5 +91,4 @@ jobs:
           INAT_BASE: ${{ secrets.INAT_BASE }}
           ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
           RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-          # NODE_ENV is injected directly without quotes
           NODE_ENV: production
