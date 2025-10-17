@@ -25,35 +25,36 @@ jobs:
         run: npm install
 
       # =================================================================
-      # CRITICAL FIX: Comprehensive Variable Aliasing
-      # The script errors indicate it is looking for non-standard variable names
-      # (e.g., DATABASE_URL, framework prefixes, or generic keys).
+      # CRITICAL FIX: Correct Key Mapping for Schema Validation
+      # The application requires BOTH the Service Role Key AND the Anon Key.
+      # We must map the correct secrets to the correct variables.
       # =================================================================
-      - name: Create .env file from Secrets (Quoted and Aliased)
+      - name: Create .env file from Secrets (Schema Compliant)
         run: |
-          echo "Synthesizing .env file with robust quoting and comprehensive variable mapping..."
+          echo "Synthesizing schema-compliant .env file..."
           # Format: KEY="VALUE" (Quoting handles special characters)
 
-          # Capture secrets into local variables for cleaner reuse
+          # Capture secrets into local variables
           S_URL="${{ secrets.SUPABASE_URL }}"
-          S_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
+          SERVICE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
+          # CRITICAL: Use the newly added secret for the Anonymous Key
+          ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"
           POOLER_URL="${{ secrets.SUPABASE_POOL_URL }}"
 
           # --- Supabase SDK Variables ---
           # Standard backend names
           printf "SUPABASE_URL=\"%s\"\n" "$S_URL" > .env
-          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "$S_KEY" >> .env
+          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "$SERVICE_KEY" >> .env
+          printf "SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
 
-          # CRITICAL FIX: Common Aliases and Framework conventions (Next.js, Vite)
-          # Alias Service Key as generic KEY and ANON_KEY
-          printf "SUPABASE_KEY=\"%s\"\n" "$S_KEY" >> .env
-          printf "SUPABASE_ANON_KEY=\"%s\"\n" "$S_KEY" >> .env
-
-          # Prefixed conventions
+          # Framework conventions (Next.js, Vite) - These require the Anon Key for public access
           printf "NEXT_PUBLIC_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
-          printf "NEXT_PUBLIC_SUPABASE_ANON_KEY=\"%s\"\n" "$S_KEY" >> .env
+          printf "NEXT_PUBLIC_SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
           printf "VITE_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
-          printf "VITE_SUPABASE_ANON_KEY=\"%s\"\n" "$S_KEY" >> .env
+          printf "VITE_SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
+
+          # Generic Aliases (Use Service Key for generic backend access if needed)
+          printf "SUPABASE_KEY=\"%s\"\n" "$SERVICE_KEY" >> .env
 
           # --- Database Connection Variables (Using the Pooler URL) ---
           # Supabase-specific and Conventional names (PostgreSQL/Prisma)
