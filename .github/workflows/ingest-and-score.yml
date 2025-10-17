@@ -22,35 +22,46 @@ jobs:
           node-version: '20.x'
 
       - name: Install dependencies
-        # Ensures 'dotenv' (and others) are installed (requires package.json to be correct)
         run: npm install
 
       # =================================================================
-      # CRITICAL FIX: Variable Mapping and Aliases in .env Synthesis
-      # The script error "Missing database environment variables" indicates
-      # it is looking for conventional names like 'DATABASE_URL'.
+      # CRITICAL FIX: Comprehensive Variable Aliasing
+      # The script errors indicate it is looking for non-standard variable names
+      # (e.g., DATABASE_URL, framework prefixes, or generic keys).
       # =================================================================
       - name: Create .env file from Secrets (Quoted and Aliased)
         run: |
-          echo "Synthesizing .env file with robust quoting and variable mapping..."
+          echo "Synthesizing .env file with robust quoting and comprehensive variable mapping..."
           # Format: KEY="VALUE" (Quoting handles special characters)
 
-          # Supabase SDK variables
-          printf "SUPABASE_URL=\"%s\"\n" "${{ secrets.SUPABASE_URL }}" > .env
-          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> .env
-
-          # Database Connection Variables (Using the Pooler URL)
-          # We capture the Pooler URL secret into a local variable for cleaner reuse
+          # Capture secrets into local variables for cleaner reuse
+          S_URL="${{ secrets.SUPABASE_URL }}"
+          S_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
           POOLER_URL="${{ secrets.SUPABASE_POOL_URL }}"
 
-          # Provide the Pooler URL under the Supabase-specific name
-          printf "SUPABASE_DB_URL=\"%s\"\n" "$POOLER_URL" >> .env
+          # --- Supabase SDK Variables ---
+          # Standard backend names
+          printf "SUPABASE_URL=\"%s\"\n" "$S_URL" > .env
+          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "$S_KEY" >> .env
 
-          # CRITICAL FIX: Provide the Pooler URL under conventional names
+          # CRITICAL FIX: Common Aliases and Framework conventions (Next.js, Vite)
+          # Alias Service Key as generic KEY and ANON_KEY
+          printf "SUPABASE_KEY=\"%s\"\n" "$S_KEY" >> .env
+          printf "SUPABASE_ANON_KEY=\"%s\"\n" "$S_KEY" >> .env
+
+          # Prefixed conventions
+          printf "NEXT_PUBLIC_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
+          printf "NEXT_PUBLIC_SUPABASE_ANON_KEY=\"%s\"\n" "$S_KEY" >> .env
+          printf "VITE_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
+          printf "VITE_SUPABASE_ANON_KEY=\"%s\"\n" "$S_KEY" >> .env
+
+          # --- Database Connection Variables (Using the Pooler URL) ---
+          # Supabase-specific and Conventional names (PostgreSQL/Prisma)
+          printf "SUPABASE_DB_URL=\"%s\"\n" "$POOLER_URL" >> .env
           printf "DATABASE_URL=\"%s\"\n" "$POOLER_URL" >> .env
           printf "POSTGRES_URL=\"%s\"\n" "$POOLER_URL" >> .env
 
-          # iNaturalist and Application variables
+          # --- iNaturalist and Application variables ---
           printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
           printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
           printf "RATE_LIMIT_RPS=\"%s\"\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
