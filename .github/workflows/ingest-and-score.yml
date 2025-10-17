@@ -8,38 +8,9 @@ permissions:
 
 jobs:
   data-pipeline:
-    name: Build, Ingest, and Process Data
+    name: Fetch, Ingest, and Process Data
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
-    # Define the comprehensive environment block for the entire job.
-    # This ensures variables are available for npm install, npm run build, and node execution.
-    env:
-      # --- Supabase SDK Variables ---
-      # Standard backend names
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-
-      # Framework conventions (Next.js, Vite) - Critical for Build-Time Embedding
-      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-      VITE_SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      VITE_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
-
-      # Generic Aliases
-      SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # --- Database Connection Variables (Using the Pooler URL) ---
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_POOL_URL }}
-      DATABASE_URL: ${{ secrets.SUPABASE_POOL_URL }}
-      POSTGRES_URL: ${{ secrets.SUPABASE_POOL_URL }}
-
-      # --- iNaturalist and Application variables ---
-      INAT_BASE: ${{ secrets.INAT_BASE }}
-      ASSIGNMENT_IDS: ${{ secrets.ASSIGNMENT_IDS }}
-      RATE_LIMIT_RPS: ${{ secrets.RATE_LIMIT_RPS }}
-      NODE_ENV: production
 
     steps:
       - name: Checkout repository
@@ -51,19 +22,57 @@ jobs:
           node-version: '20.x'
 
       - name: Install dependencies
+        # Ensures 'dotenv' is installed
         run: npm install
 
       # =================================================================
-      # CRITICAL FIX: Execute the Build Process
-      # The application requires build-time embedding of environment variables.
-      # The 'env' block defined at the job level ensures the variables are present here.
+      # CRITICAL FIX: Precise .env Synthesis (Selective Quoting)
+      # The application ignores direct injection and requires a .env file.
+      # We must quote complex secrets (URLs, Keys) but MUST NOT quote simple values (NODE_ENV).
       # =================================================================
-      - name: Build Application
-        run: npm run build
+      - name: Create .env file from Secrets (Precise Quoting)
+        run: |
+          echo "Synthesizing .env file with precise quoting..."
+
+          # Capture secrets into local variables
+          S_URL="${{ secrets.SUPABASE_URL }}"
+          SERVICE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
+          ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"
+          POOLER_URL="${{ secrets.SUPABASE_POOL_URL }}"
+
+          # --- Supabase SDK Variables (Quoted) ---
+          # Format: KEY="VALUE"
+          printf "SUPABASE_URL=\"%s\"\n" "$S_URL" > .env
+          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "$SERVICE_KEY" >> .env
+          printf "SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
+          printf "NEXT_PUBLIC_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
+          printf "NEXT_PUBLIC_SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
+          printf "VITE_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
+          printf "VITE_SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
+          printf "SUPABASE_KEY=\"%s\"\n" "$SERVICE_KEY" >> .env
+
+          # --- Database Connection Variables (Quoted) ---
+          printf "SUPABASE_DB_URL=\"%s\"\n" "$POOLER_URL" >> .env
+          printf "DATABASE_URL=\"%s\"\n" "$POOLER_URL" >> .env
+          printf "POSTGRES_URL=\"%s\"\n" "$POOLER_URL" >> .env
+
+          # --- iNaturalist Variables (Quoted, assuming complexity) ---
+          printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
+          printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
+
+          # --- Application variables (CRITICAL: UNQUOTED) ---
+          # Format: KEY=VALUE
+          # Assuming RATE_LIMIT_RPS is a simple number
+          printf "RATE_LIMIT_RPS=%s\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
+          # NODE_ENV must be unquoted for correct behavior in many applications
+          printf "NODE_ENV=production\n" >> .env
+
+          echo ".env file created successfully."
 
       # =================================================================
-      # Execution Step
+      # Execution Step (Using forced preloading)
+      # We use the Node.js '-r' flag to preload 'dotenv/config'.
+      # This forces the correctly synthesized .env file to be loaded.
       # =================================================================
       - name: Run Data Ingestion
-        # The script now runs with the configuration correctly embedded.
-        run: node ingest.mjs
+        run: node -r dotenv/config ingest.mjs
