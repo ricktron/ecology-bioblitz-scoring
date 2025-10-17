@@ -22,17 +22,15 @@ jobs:
           node-version: '20.x'
 
       - name: Install dependencies
-        # Ensures 'dotenv' is installed
+        # Ensures 'dotenv' is installed (verify package.json includes it)
         run: npm install
 
       # =================================================================
-      # CRITICAL FIX: Precise .env Synthesis (Selective Quoting)
-      # The application ignores direct injection and requires a .env file.
-      # We must quote complex secrets (URLs, Keys) but MUST NOT quote simple values (NODE_ENV).
+      # .env Synthesis (Precise Quoting) - This configuration was correct.
       # =================================================================
       - name: Create .env file from Secrets (Precise Quoting)
         run: |
-          echo "Synthesizing .env file with precise quoting..."
+          echo "Synthesizing .env file at $(pwd)/.env"
 
           # Capture secrets into local variables
           S_URL="${{ secrets.SUPABASE_URL }}"
@@ -41,7 +39,6 @@ jobs:
           POOLER_URL="${{ secrets.SUPABASE_POOL_URL }}"
 
           # --- Supabase SDK Variables (Quoted) ---
-          # Format: KEY="VALUE"
           printf "SUPABASE_URL=\"%s\"\n" "$S_URL" > .env
           printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "$SERVICE_KEY" >> .env
           printf "SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
@@ -56,23 +53,35 @@ jobs:
           printf "DATABASE_URL=\"%s\"\n" "$POOLER_URL" >> .env
           printf "POSTGRES_URL=\"%s\"\n" "$POOLER_URL" >> .env
 
-          # --- iNaturalist Variables (Quoted, assuming complexity) ---
+          # --- iNaturalist Variables (Quoted) ---
           printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
           printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
 
-          # --- Application variables (CRITICAL: UNQUOTED) ---
-          # Format: KEY=VALUE
-          # Assuming RATE_LIMIT_RPS is a simple number
+          # --- Application variables (UNQUOTED) ---
           printf "RATE_LIMIT_RPS=%s\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
-          # NODE_ENV must be unquoted for correct behavior in many applications
           printf "NODE_ENV=production\n" >> .env
 
           echo ".env file created successfully."
 
       # =================================================================
-      # Execution Step (Using forced preloading)
-      # We use the Node.js '-r' flag to preload 'dotenv/config'.
-      # This forces the correctly synthesized .env file to be loaded.
+      # CRITICAL FIX: Explicitly Specify .env Path and Control Loading Order
+      # We eliminate ambiguity by configuring dotenv with the absolute path
+      # to the .env file before dynamically importing the main module.
       # =================================================================
       - name: Run Data Ingestion
-        run: node -r dotenv/config ingest.mjs
+        run: |
+          # Execute an inline script to configure dotenv explicitly and then import the main module.
+          node -e '
+            // 1. Configure dotenv with the absolute path provided via ENV_PATH environment variable.
+            // This uses CommonJS require as it is more reliable for configuration setup.
+            require("dotenv").config({ path: process.env.ENV_PATH });
+
+            // 2. Dynamically import the main ES Module.
+            // This ensures configuration is loaded into process.env before the module initializes.
+            // Note: This assumes ingest.mjs is at the root. If it is in a subdirectory (e.g., src/),
+            // the path must be adjusted (e.g., import("./src/ingest.mjs")).
+            import("./ingest.mjs");
+          '
+        env:
+          # Pass the absolute path to the Node.js process using github.workspace context
+          ENV_PATH: ${{ github.workspace }}/.env
