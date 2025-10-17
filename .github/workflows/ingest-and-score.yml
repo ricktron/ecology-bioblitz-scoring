@@ -1,49 +1,63 @@
-name: Ingest and Score New Observations
+name: Ingest iNaturalist Data and Score
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  ingest:
+  data-pipeline:
+    name: Fetch, Ingest, and Process Data
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: ./ecology-bio-blitz-scoring
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          path: 'ecology-bio-blitz-scoring'
 
-      - name: Set up Node.js
+      - name: Setup Node.js LTS (v20)
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.x'
 
       - name: Install dependencies
+        # Ensures 'dotenv' and other dependencies are installed
         run: npm install
 
       # =================================================================
-      # FORENSIC DIAGNOSTICS
-      # These steps will log the exact environment state before the script runs.
+      # FIX 1: Synthesize .env File with Robust Quoting
+      # We must enclose the values in double quotes to handle special characters
+      # (especially in database connection strings).
       # =================================================================
-      - name: Verify Environment and Secrets
+      - name: Create .env file from Secrets (Quoted)
         run: |
-          echo "--- Environment Variables ---"
-          printenv | sort
-          echo "---------------------------"
-          echo "Checking for Supabase URL presence: ${{ env.SUPABASE_URL_PRESENT }}"
-          echo "Checking for Service Key presence: ${{ env.SERVICE_KEY_PRESENT }}"
-        env:
-          # We check for presence without printing the secret value.
-          SUPABASE_URL_PRESENT: ${{ !!secrets.SUPABASE_URL }}
-          SERVICE_KEY_PRESENT: ${{ !!secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          echo "Synthesizing .env file with robust quoting..."
+          # Format: KEY="VALUE"
+          # We use printf with escaped quotes in the format string: printf "KEY=\"%s\"\n"
 
+          printf "SUPABASE_URL=\"%s\"\n" "${{ secrets.SUPABASE_URL }}" > .env
+          printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" >> .env
+
+          # CRITICAL: The Pooler URL likely contains special characters.
+          printf "SUPABASE_DB_URL=\"%s\"\n" "${{ secrets.SUPABASE_POOL_URL }}" >> .env
+
+          printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
+          printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
+          printf "RATE_LIMIT_RPS=\"%s\"\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
+          printf "NODE_ENV=\"production\"\n" >> .env
+
+          echo ".env file created successfully."
+
+      # Optional Diagnostic: Verify the contents (GitHub will automatically mask the values)
+      - name: Verify .env file structure (Masked)
+        run: cat .env
+
+      # =================================================================
+      # FIX 2: Force Configuration Loading via Node.js Runtime
+      # We use the Node.js '-r' flag to preload 'dotenv/config'.
+      # This forces the .env file to be loaded into process.env BEFORE ingest.mjs starts,
+      # bypassing any potentially flawed loading logic within the script.
+      # =================================================================
       - name: Run Data Ingestion
-        env:
-          # Using the exact variable names from your working file
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
-        run: node ingest.mjs
+        run: node -r dotenv/config ingest.mjs
