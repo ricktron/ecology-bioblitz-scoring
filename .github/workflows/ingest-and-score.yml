@@ -1,4 +1,4 @@
-name: Ingest iNaturalist Data and Score
+name: Ingest iNaturalist Data (FINAL DIAGNOSTIC)
 
 on:
   workflow_dispatch:
@@ -22,66 +22,88 @@ jobs:
           node-version: '20.x'
 
       - name: Install dependencies
-        # Ensures 'dotenv' is installed (verify package.json includes it)
+        # Ensures 'dotenv' is installed (as confirmed in package.json)
         run: npm install
 
-      # =================================================================
-      # .env Synthesis (Precise Quoting) - This configuration was correct.
-      # =================================================================
+      # .env Synthesis (Precise Quoting) - This configuration is verified as correct.
       - name: Create .env file from Secrets (Precise Quoting)
         run: |
           echo "Synthesizing .env file at $(pwd)/.env"
-
-          # Capture secrets into local variables
+          # Capture secrets
           S_URL="${{ secrets.SUPABASE_URL }}"
           SERVICE_KEY="${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}"
           ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}"
           POOLER_URL="${{ secrets.SUPABASE_POOL_URL }}"
 
-          # --- Supabase SDK Variables (Quoted) ---
+          # --- Quoted Variables (Secrets, URLs, Keys) ---
           printf "SUPABASE_URL=\"%s\"\n" "$S_URL" > .env
           printf "SUPABASE_SERVICE_ROLE_KEY=\"%s\"\n" "$SERVICE_KEY" >> .env
           printf "SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
+          # Framework aliases
           printf "NEXT_PUBLIC_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
           printf "NEXT_PUBLIC_SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
           printf "VITE_SUPABASE_URL=\"%s\"\n" "$S_URL" >> .env
           printf "VITE_SUPABASE_ANON_KEY=\"%s\"\n" "$ANON_KEY" >> .env
           printf "SUPABASE_KEY=\"%s\"\n" "$SERVICE_KEY" >> .env
-
-          # --- Database Connection Variables (Quoted) ---
+          # Database URLs
           printf "SUPABASE_DB_URL=\"%s\"\n" "$POOLER_URL" >> .env
           printf "DATABASE_URL=\"%s\"\n" "$POOLER_URL" >> .env
           printf "POSTGRES_URL=\"%s\"\n" "$POOLER_URL" >> .env
-
-          # --- iNaturalist Variables (Quoted) ---
+          # iNaturalist
           printf "INAT_BASE=\"%s\"\n" "${{ secrets.INAT_BASE }}" >> .env
           printf "ASSIGNMENT_IDS=\"%s\"\n" "${{ secrets.ASSIGNMENT_IDS }}" >> .env
 
-          # --- Application variables (UNQUOTED) ---
+          # --- UNQUOTED Variables (Simple values, NODE_ENV) ---
           printf "RATE_LIMIT_RPS=%s\n" "${{ secrets.RATE_LIMIT_RPS }}" >> .env
           printf "NODE_ENV=production\n" >> .env
 
-          echo ".env file created successfully."
-
       # =================================================================
-      # CRITICAL FIX: Explicitly Specify .env Path and Control Loading Order
-      # We eliminate ambiguity by configuring dotenv with the absolute path
-      # to the .env file before dynamically importing the main module.
+      # CRITICAL DIAGNOSTIC: Intrusive Diagnostic before Module Import
+      # We inspect process.env immediately after explicit dotenv loading.
       # =================================================================
-      - name: Run Data Ingestion
+      - name: Run Data Ingestion (Intrusive Diagnostic)
         run: |
-          # Execute an inline script to configure dotenv explicitly and then import the main module.
           node -e '
-            // 1. Configure dotenv with the absolute path provided via ENV_PATH environment variable.
-            // This uses CommonJS require as it is more reliable for configuration setup.
-            require("dotenv").config({ path: process.env.ENV_PATH });
+            // 1. Configure dotenv explicitly
+            const dotenv = require("dotenv");
+            console.log("Loading configuration from: " + process.env.ENV_PATH);
+            const result = dotenv.config({ path: process.env.ENV_PATH });
 
-            // 2. Dynamically import the main ES Module.
-            // This ensures configuration is loaded into process.env before the module initializes.
-            // Note: This assumes ingest.mjs is at the root. If it is in a subdirectory (e.g., src/),
-            // the path must be adjusted (e.g., import("./src/ingest.mjs")).
+            if (result.error) {
+              console.error("::error::DOTENV FAILED TO LOAD OR PARSE FILE:", result.error);
+              process.exit(1);
+            }
+
+            // 2. IMMEDIATE DIAGNOSTIC INSPECTION
+            console.log("--- Inspection immediately after dotenv.config ---");
+            // List of keys we expect the application requires based on previous analysis
+            const requiredKeys = [
+              "SUPABASE_URL", "NEXT_PUBLIC_SUPABASE_URL",
+              "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+              "DATABASE_URL", "NODE_ENV"
+            ];
+            let failure = false;
+            requiredKeys.forEach(key => {
+              const value = process.env[key];
+              if (value && value.length > 0) {
+                // Securely report length without exposing value
+                console.log(`[SUCCESS] Key: ${key} | Length: ${value.length}`);
+              } else {
+                console.error(`[FAILURE] Key: ${key} | Status: MISSING or EMPTY`);
+                failure = true;
+              }
+            });
+            console.log("------------------------------------------------");
+
+            if (failure) {
+              console.error("::error::DIAGNOSTIC FAILURE: Variables missing immediately after explicit load. This indicates a parsing issue or file access problem.");
+              process.exit(1);
+            }
+
+            // 3. Dynamically import the main ES Module.
+            console.log("DIAGNOSTIC SUCCESS: Configuration loaded into process.env. Importing ingest.mjs...");
             import("./ingest.mjs");
           '
         env:
-          # Pass the absolute path to the Node.js process using github.workspace context
+          # Pass the absolute path to the Node.js process
           ENV_PATH: ${{ github.workspace }}/.env
