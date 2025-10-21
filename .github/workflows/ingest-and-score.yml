@@ -8,21 +8,21 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    env:
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-      INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
+env:
+  SUPABASE_URL:         ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_KEY }}
+  INAT_PROJECT_SLUG:    ${{ secrets.INAT_PROJECT_SLUG || vars.INAT_PROJECT_SLUG }}
 
-      INAT_MODE: ${{ secrets.INAT_MODE }}           # DEMO/TRIP
-      DEMO_D1: ${{ secrets.DEMO_D1 }}
-      DEMO_D2: ${{ secrets.DEMO_D2 }}
-      DEMO_BBOX: ${{ secrets.DEMO_BBOX }}
-      DEMO_USER_LOGINS: ${{ secrets.DEMO_USER_LOGINS }}
-      TRIP_D1: ${{ secrets.TRIP_D1 }}
-      TRIP_D2: ${{ secrets.TRIP_D2 }}
-      TRIP_BBOX: ${{ secrets.TRIP_BBOX }}
+  INAT_MODE:        ${{ secrets.INAT_MODE }}
+  DEMO_D1:          ${{ secrets.DEMO_D1 }}
+  DEMO_D2:          ${{ secrets.DEMO_D2 }}
+  DEMO_BBOX:        ${{ secrets.DEMO_BBOX }}
+  DEMO_USER_LOGINS: ${{ secrets.DEMO_USER_LOGINS }}
+  TRIP_D1:          ${{ secrets.TRIP_D1 }}
+  TRIP_D2:          ${{ secrets.TRIP_D2 }}
+  TRIP_BBOX:        ${{ secrets.TRIP_BBOX }}
+  ALERT_WEBHOOK_URL:${{ secrets.ALERT_WEBHOOK_URL }}
 
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
 
     steps:
       - uses: actions/checkout@v4
