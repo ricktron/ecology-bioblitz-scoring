@@ -1,3 +1,4 @@
+# .github/workflows/ingest-and-score.yml
 name: Ingest & Score
 
 on:
@@ -8,21 +9,24 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-env:
-  SUPABASE_URL:         ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
-  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_KEY }}
-  INAT_PROJECT_SLUG:    ${{ secrets.INAT_PROJECT_SLUG || vars.INAT_PROJECT_SLUG }}
+    env:
+      # Required
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY != '' && secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
 
-  INAT_MODE:        ${{ secrets.INAT_MODE }}
-  DEMO_D1:          ${{ secrets.DEMO_D1 }}
-  DEMO_D2:          ${{ secrets.DEMO_D2 }}
-  DEMO_BBOX:        ${{ secrets.DEMO_BBOX }}
-  DEMO_USER_LOGINS: ${{ secrets.DEMO_USER_LOGINS }}
-  TRIP_D1:          ${{ secrets.TRIP_D1 }}
-  TRIP_D2:          ${{ secrets.TRIP_D2 }}
-  TRIP_BBOX:        ${{ secrets.TRIP_BBOX }}
-  ALERT_WEBHOOK_URL:${{ secrets.ALERT_WEBHOOK_URL }}
+      # Mode + filters
+      INAT_MODE: ${{ secrets.INAT_MODE }}
+      DEMO_D1: ${{ secrets.DEMO_D1 }}
+      DEMO_D2: ${{ secrets.DEMO_D2 }}
+      DEMO_BBOX: ${{ secrets.DEMO_BBOX }}
+      DEMO_USER_LOGINS: ${{ secrets.DEMO_USER_LOGINS }}
+      TRIP_D1: ${{ secrets.TRIP_D1 }}
+      TRIP_D2: ${{ secrets.TRIP_D2 }}
+      TRIP_BBOX: ${{ secrets.TRIP_BBOX }}
 
+      # Optional alerting webhook
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
 
     steps:
       - uses: actions/checkout@v4
@@ -35,9 +39,17 @@ env:
         shell: bash
         run: |
           set -euo pipefail
+          ok=1
           for v in SUPABASE_URL SUPABASE_SERVICE_KEY INAT_PROJECT_SLUG; do
-            if [ -z "${!v:-}" ]; then echo "::error::Missing $v"; exit 1; fi
+            val="${!v:-}"
+            if [ -z "$val" ]; then
+              echo "::error::Missing $v"
+              ok=0
+            else
+              echo "$v: present (len=${#val})"
+            fi
           done
+          [ "$ok" = "1" ] || exit 1
 
       - name: Install deps (deterministic)
         run: npm ci
@@ -62,5 +74,5 @@ env:
         if: failure() && env.ALERT_WEBHOOK_URL != ''
         shell: bash
         run: |
-          payload='{"text":"❌ EcoQuest ingest failed: '${GITHUB_REPOSITORY}' run '${GITHUB_RUN_ID}' commit '${GITHUB_SHA}'"}'
+          payload='{"text":"❌ EcoQuest ingest failed: '"$GITHUB_REPOSITORY"' run '"$GITHUB_RUN_ID"' commit '"$GITHUB_SHA"'"}'
           curl -sS -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_WEBHOOK_URL"
