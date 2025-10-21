@@ -1,13 +1,11 @@
 {
-  "name": "ecoquest-live-ingestion",
-  "version": "1.0.0",
-  "description": "Data ingestion pipeline",
-  "main": "ingest.mjs",
+  "name": "ecoquest-live-ingest",
+  "version": "0.4.0",
+  "private": true,
   "type": "module",
-  "dependencies": {
-    "@supabase/supabase-js": "^2.0.0",
-    "node-fetch": "^3.0.0",
-    "util": "^0.12.5",
-    "tslib": "^2.0.0"
-  }
+  "engines": { "node": ">=20.0.0" },
+  "scripts": {
+    "ingest": "node ingest.mjs"
+  },
+  "dependencies": {}
 }
