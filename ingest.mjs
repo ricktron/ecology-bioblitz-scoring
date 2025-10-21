@@ -1,6 +1,6 @@
 // ingest.mjs
-// EcoQuest Live — P1 hardening + DEMO/TRIP toggle
-// Node 20+ (uses global fetch). ESM enabled via package.json "type": "module".
+// EcoQuest Live — P1 hardening + DEMO/TRIP toggle + flexible ID column
+// Node 20+, ESM ("type": "module" in package.json)
 
 const REQUIRED_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "INAT_PROJECT_SLUG"];
 for (const k of REQUIRED_ENV) {
@@ -14,29 +14,26 @@ const SUPABASE_URL = process.env.SUPABASE_URL.replace(/\/+$/, "");
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const INAT_PROJECT_SLUG = process.env.INAT_PROJECT_SLUG;
 
+// NEW: make table/PK configurable
+const OBS_TABLE = process.env.OBS_TABLE || "observations";
+const OBS_ID_COLUMN = process.env.OBS_ID_COLUMN || "id"; // e.g., "observation_id"
+const SKIP_DELETES = String(process.env.SKIP_DELETES || "").toLowerCase() === "true";
+
 const INAT_MODE = (process.env.INAT_MODE || "TRIP").toUpperCase(); // DEMO or TRIP
-
-// DEMO (5y + Costa Rica bbox) — set via .env or GitHub secrets
-const DEMO_D1 = process.env.DEMO_D1 || ""; // e.g., 2019-11-01
-const DEMO_D2 = process.env.DEMO_D2 || ""; // e.g., 2025-11-01
-const DEMO_BBOX = (process.env.DEMO_BBOX || "").split(",").map(Number); // swlat,swlng,nelat,nelng
-const DEMO_USER_LOGINS = (process.env.DEMO_USER_LOGINS || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
-
-// TRIP (project + optional bbox/dates) — set a week before departure
+const DEMO_D1 = process.env.DEMO_D1 || "";
+const DEMO_D2 = process.env.DEMO_D2 || "";
+const DEMO_BBOX = (process.env.DEMO_BBOX || "").split(",").map(Number);
+const DEMO_USER_LOGINS = (process.env.DEMO_USER_LOGINS || "").split(",").map(s => s.trim()).filter(Boolean);
 const TRIP_D1 = process.env.TRIP_D1 || "";
 const TRIP_D2 = process.env.TRIP_D2 || "";
 const TRIP_BBOX = (process.env.TRIP_BBOX || "").split(",").map(Number);
 
-const SAFETY_OVERLAP_SECONDS = 30;  // –30s overlap window
-const PER_PAGE = 200;               // iNat max = 200
-const MAX_PAGES = 200;              // hard cap
-const MAX_RETRIES = 6;              // exp backoff
+const SAFETY_OVERLAP_SECONDS = 30;
+const PER_PAGE = 200;
+const MAX_PAGES = 200;
+const MAX_RETRIES = 6;
 const BASE_WAIT_MS = 500;
-const OBS_TABLE = "observations";
-const RUNS_TABLE = "score_runs";    // ledger with inat_updated_through_utc
+const RUNS_TABLE = "score_runs";
 const USER_AGENT = "EcoQuestLive/ingest (+contact: maintainer)";
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -87,13 +84,13 @@ async function sbUpsert(table, rows, onConflict) {
   return { count: rows.length };
 }
 
-async function sbDeleteByIds(table, ids) {
+async function sbDeleteByIds(table, idColumn, ids) {
   if (!ids.length) return { count: 0 };
   let total = 0;
   const chunk = 5000;
   for (let i = 0; i < ids.length; i += chunk) {
-    const slice = ids.slice(i, i + chunk);
-    const url = `${SUPABASE_URL}/rest/v1/${table}?id=in.(${slice.map(x => encodeURIComponent(x)).join(",")})`;
+    const slice = ids.slice(i, i + chunk).map(x => encodeURIComponent(x));
+    const url = `${SUPABASE_URL}/rest/v1/${table}?${encodeURIComponent(idColumn)}=in.(${slice.join(",")})`;
     const res = await fetch(url, { method: "DELETE", headers: sbHeaders() });
     if (!res.ok) throw new Error(`Supabase DELETE ${table} → ${res.status} ${await res.text()}`);
     total += slice.length;
@@ -101,24 +98,22 @@ async function sbDeleteByIds(table, ids) {
   return { count: total };
 }
 
-function iso(dt) {
-  const d = dt instanceof Date ? dt : new Date(dt);
-  return d.toISOString();
-}
+function iso(dt) { return (dt instanceof Date ? dt : new Date(dt)).toISOString(); }
 
 async function getSinceTimestamp() {
-  // Use the last ledgered 'inat_updated_through_utc' minus overlap; fallback to epoch
-  const rows = await sbSelect(`${RUNS_TABLE}?select=inat_updated_through_utc&order=inat_updated_through_utc.desc&limit=1`);
-  const last = rows?.[0]?.inat_updated_through_utc;
-  const base = last ? new Date(last) : new Date(0);
-  return new Date(base.getTime() - SAFETY_OVERLAP_SECONDS * 1000);
+  try {
+    const rows = await sbSelect(`${RUNS_TABLE}?select=inat_updated_through_utc&order=inat_updated_through_utc.desc&limit=1`);
+    const last = rows?.[0]?.inat_updated_through_utc;
+    const base = last ? new Date(last) : new Date(0);
+    return new Date(base.getTime() - SAFETY_OVERLAP_SECONDS * 1000);
+  } catch {
+    return new Date(0); // bootstrap
+  }
 }
 
 function iNatUrl(path, params) {
   const u = new URL(`https://api.inaturalist.org/v1/${path}`);
-  Object.entries(params).forEach(([k, v]) => {
-    if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, v);
-  });
+  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, v); });
   return u.toString();
 }
 
@@ -126,27 +121,14 @@ function buildQueryParams({ page, perPage, sinceIso }) {
   if (INAT_MODE === "DEMO") {
     const [swlat, swlng, nelat, nelng] = DEMO_BBOX.length === 4 ? DEMO_BBOX : [null, null, null, null];
     const base = {
-      order: "asc",
-      order_by: "updated_at",
-      updated_since: sinceIso,
-      per_page: String(perPage),
-      page: String(page),
-      d1: DEMO_D1,
-      d2: DEMO_D2,
-      swlat, swlng, nelat, nelng,
+      order: "asc", order_by: "updated_at", updated_since: sinceIso,
+      per_page: String(perPage), page: String(page),
+      d1: DEMO_D1, d2: DEMO_D2, swlat, swlng, nelat, nelng,
     };
     if (DEMO_USER_LOGINS.length) base.user_login = DEMO_USER_LOGINS.join(",");
     return base;
   }
-  // TRIP (project-based with optional time/space narrowing)
-  const base = {
-    project_slug: INAT_PROJECT_SLUG,
-    order: "asc",
-    order_by: "updated_at",
-    updated_since: sinceIso,
-    per_page: String(perPage),
-    page: String(page),
-  };
+  const base = { project_slug: INAT_PROJECT_SLUG, order: "asc", order_by: "updated_at", updated_since: sinceIso, per_page: String(perPage), page: String(page) };
   if (TRIP_D1) base.d1 = TRIP_D1;
   if (TRIP_D2) base.d2 = TRIP_D2;
   if (TRIP_BBOX.length === 4) {
@@ -157,18 +139,16 @@ function buildQueryParams({ page, perPage, sinceIso }) {
 }
 
 async function fetchUpdates(sinceIso) {
-  let page = 1;
-  let maxSeen = sinceIso;
-  let totalUpserted = 0;
-
+  let page = 1, maxSeen = sinceIso, totalUpserted = 0;
   while (page <= MAX_PAGES) {
     const url = iNatUrl("observations", buildQueryParams({ page, perPage: PER_PAGE, sinceIso }));
     const data = await fetchJson(url, { retryLabel: "iNat updates" });
     const results = data?.results ?? [];
     if (!results.length) break;
 
+    // map into your DB column names
     const rows = results.map(r => ({
-      id: r.id,
+      [OBS_ID_COLUMN]: r.id,
       user_id: r.user?.id ?? null,
       taxon_id: r.taxon?.id ?? null,
       observed_at: r.observed_on_details?.date ? iso(r.observed_on_details.date) : (r.time_observed_at || null),
@@ -179,7 +159,7 @@ async function fetchUpdates(sinceIso) {
       created_at: r.created_at ? iso(r.created_at) : null,
     }));
 
-    await sbUpsert(OBS_TABLE, rows, "id");
+    await sbUpsert(OBS_TABLE, rows, OBS_ID_COLUMN);
     totalUpserted += rows.length;
 
     for (const r of rows) if (r.updated_at && r.updated_at > maxSeen) maxSeen = r.updated_at;
@@ -190,8 +170,6 @@ async function fetchUpdates(sinceIso) {
 }
 
 async function fetchDeletedIdsSince(sinceIso) {
-  // iNat doesn't expose a stable public "deleted observations" feed for all cases.
-  // Try a best-effort; if it fails, we'll do reconciliation.
   try {
     const url = iNatUrl("observations/deleted", {
       project_slug: INAT_PROJECT_SLUG,
@@ -202,12 +180,12 @@ async function fetchDeletedIdsSince(sinceIso) {
     const results = data?.results ?? [];
     return results.map(r => r.id).filter(Boolean);
   } catch {
-    return null; // trigger reconciliation
+    return null;
   }
 }
 
 async function reconcileDeletes(sinceIso) {
-  // Pull current IDs from iNat in the same updated window and compare to our recent Supabase set.
+  // Build current ID universe from iNat in the window
   const current = new Set();
   let page = 1;
   while (page <= 50) {
@@ -215,13 +193,15 @@ async function reconcileDeletes(sinceIso) {
     const data = await fetchJson(url, { retryLabel: "iNat reconciliation updates" });
     const results = data?.results ?? [];
     if (!results.length) break;
-    for (const r of results) current.add(r.id);
+    for (const r of results) current.add(String(r.id));
     if (results.length < PER_PAGE) break;
     page += 1;
   }
 
-  const sbIds = await sbSelect(`${OBS_TABLE}?select=id&updated_at=gte.${sinceIso}`);
-  const supabaseRecent = new Set(sbIds.map(x => x.id));
+  // Pull recent Supabase IDs using whichever column name you have
+  const sel = encodeURIComponent(`${OBS_ID_COLUMN}`);
+  const rows = await sbSelect(`${OBS_TABLE}?select=${sel}&updated_at=gte.${sinceIso}`);
+  const supabaseRecent = new Set(rows.map(x => String(x[OBS_ID_COLUMN])));
   const toDelete = [...supabaseRecent].filter(id => !current.has(id));
   return toDelete;
 }
@@ -235,7 +215,8 @@ async function recordRun(maxSeenIso, stats) {
     ingested_count: stats.upserts,
     deleted_count: stats.deletes,
   }];
-  await sbUpsert(RUNS_TABLE, row);
+  try { await sbUpsert(RUNS_TABLE, row); }
+  catch (e) { console.warn("[recordRun] ledger write skipped:", e.message); }
 }
 
 async function main() {
@@ -245,14 +226,20 @@ async function main() {
 
   console.log(JSON.stringify({
     mode: INAT_MODE,
+    table: OBS_TABLE,
+    id_column: OBS_ID_COLUMN,
     params_preview: buildQueryParams({ page: 1, perPage: PER_PAGE, sinceIso })
   }));
 
   const { totalUpserted, maxSeen } = await fetchUpdates(sinceIso);
 
-  let deletedIds = await fetchDeletedIdsSince(sinceIso);
-  if (deletedIds === null) deletedIds = await reconcileDeletes(sinceIso);
-  if (deletedIds.length) await sbDeleteByIds(OBS_TABLE, deletedIds);
+  let deletedIds = [];
+  if (!SKIP_DELETES) {
+    deletedIds = await fetchDeletedIdsSince(sinceIso) ?? await reconcileDeletes(sinceIso);
+    if (deletedIds.length) await sbDeleteByIds(OBS_TABLE, OBS_ID_COLUMN, deletedIds);
+  } else {
+    console.log("[deletes] SKIP_DELETES=true — skipping deletions this run");
+  }
 
   const endedAt = new Date();
   const maxSeenIso = maxSeen || sinceIso;
