@@ -1,4 +1,3 @@
-# .github/workflows/ingest-and-score.yml
 name: Ingest & Score
 
 on:
@@ -10,22 +9,26 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      OBS_TABLE: ${{ secrets.OBS_TABLE }}             # optional (defaults to "observations")
-      OBS_ID_COLUMN: ${{ secrets.OBS_ID_COLUMN }}     # REQUIRED if your PK isn't literally "id"
-      SKIP_DELETES: ${{ secrets.SKIP_DELETES }}       # optional: "true" to bypass delete pass
+      # Required
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY != '' && secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
       INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
 
       # Mode + filters
-      INAT_MODE: ${{ secrets.INAT_MODE }}
-      DEMO_D1: ${{ secrets.DEMO_D1 }}
-      DEMO_D2: ${{ secrets.DEMO_D2 }}
-      DEMO_BBOX: ${{ secrets.DEMO_BBOX }}
+      INAT_MODE:        ${{ secrets.INAT_MODE }}
+      DEMO_D1:          ${{ secrets.DEMO_D1 }}
+      DEMO_D2:          ${{ secrets.DEMO_D2 }}
+      DEMO_BBOX:        ${{ secrets.DEMO_BBOX }}
       DEMO_USER_LOGINS: ${{ secrets.DEMO_USER_LOGINS }}
-      TRIP_D1: ${{ secrets.TRIP_D1 }}
-      TRIP_D2: ${{ secrets.TRIP_D2 }}
-      TRIP_BBOX: ${{ secrets.TRIP_BBOX }}
+      TRIP_D1:          ${{ secrets.TRIP_D1 }}
+      TRIP_D2:          ${{ secrets.TRIP_D2 }}
+      TRIP_BBOX:        ${{ secrets.TRIP_BBOX }}
+
+      # Flexible schema knobs
+      OBS_TABLE:              ${{ secrets.OBS_TABLE }}
+      OBS_ID_COLUMN:          ${{ secrets.OBS_ID_COLUMN }}
+      OBS_UPDATED_AT_COLUMN:  ${{ secrets.OBS_UPDATED_AT_COLUMN }}
+      SKIP_DELETES:           ${{ secrets.SKIP_DELETES }}
 
       # Optional alerting webhook
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
@@ -64,6 +67,12 @@ jobs:
               "$SUPABASE_URL/rest/v1/config_filters?id=is.true&select=id")
           echo "config_filters lookup: $r"
           echo "$r" | grep -q "true" || (echo "::error::No active config_filters row in DB"; exit 1)
+
+      - name: Preflight: list columns (first row keys)
+        run: |
+          curl -sS -H "apikey: $SUPABASE_SERVICE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            "$SUPABASE_URL/rest/v1/${OBS_TABLE:-observations}?select=*&limit=1" \
+            | jq '.[0] | keys'
 
       - name: Run ingest
         run: node ingest.mjs
