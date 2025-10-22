@@ -1,13 +1,13 @@
 -- MVP Item #2: Scoring Writer RPC + score_entries table
 --
--- Purpose: Create idempotent RPC that computes scores from observations
---          and populates score_entries filtered by config_filters
+-- OUTDATED - Schema conflict with existing aggregated table
+-- Use mvp_item_2_score_entries_obs_FINAL.sql instead
 --
--- Instructions:
---   1. Copy this entire SQL block
---   2. Go to Supabase Dashboard → SQL Editor
---   3. Paste and execute
---   4. Run verification queries at the bottom
+-- Issue: This version tried to use score_entries table which already exists
+-- with a different schema (aggregated per student, not per observation).
+--
+-- Solution: New table score_entries_obs for per-observation detail.
+-- See: mvp_item_2_score_entries_obs_FINAL.sql
 
 -- ============================================================================
 -- A1) Ensure score_entries table exists (idempotent, composite PK)
