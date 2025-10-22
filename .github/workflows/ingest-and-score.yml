@@ -74,6 +74,15 @@ jobs:
       - name: "Run ingest"
         run: node ingest.mjs
 
+      - name: "Compute scores (MVP)"
+        run: |
+          out=$(curl -sS -X POST \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            "$SUPABASE_URL/rest/v1/rpc/compute_scores_mvp")
+          echo "$out" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: "Refresh leaderboard MV"
         run: |
           curl -sS -X POST \
