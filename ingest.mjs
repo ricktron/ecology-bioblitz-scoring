@@ -30,7 +30,6 @@ const TRIP_D1 = process.env.TRIP_D1 || "";
 const TRIP_D2 = process.env.TRIP_D2 || "";
 const TRIP_BBOX = (process.env.TRIP_BBOX || "").split(",").map(Number);
 
-// Tunables
 const SAFETY_OVERLAP_SECONDS = 30;
 const PER_PAGE = 200;
 const MAX_PAGES = 200;
@@ -94,31 +93,28 @@ async function sbDeleteByIds(table, idColumn, ids) {
   return { count: total };
 }
 
-// --- schema autodetect helpers ---
+// ---------- schema autodetect ----------
 async function sbColumnExists(table, column) {
-  // Probe column existence: 200 if exists, 400 if not
   const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(table)}?select=${encodeURIComponent(column)}&limit=0`;
   const res = await fetch(url, { headers: sbHeaders() });
   return res.ok;
 }
 async function detectColumns() {
-  const mandatory = new Set([OBS_ID_COLUMN]); // must exist
-  const optionalNames = [
+  const must = new Set([OBS_ID_COLUMN]); // must exist
+  const optional = [
     "user_id",
     "taxon_id",
     "observed_at",
-    OBS_UPDATED_AT_COLUMN, // may equal "updated_at"
+    OBS_UPDATED_AT_COLUMN,
     "latitude",
     "longitude",
     "quality_grade",
     "created_at",
   ];
-  const present = new Set([...mandatory]);
-  for (const col of optionalNames) {
+  const present = new Set([...must]);
+  for (const col of optional) {
     if (!col) continue;
-    try {
-      if (await sbColumnExists(OBS_TABLE, col)) present.add(col);
-    } catch { /* ignore */ }
+    try { if (await sbColumnExists(OBS_TABLE, col)) present.add(col); } catch {}
   }
   return present;
 }
@@ -126,7 +122,6 @@ async function detectColumns() {
 function iso(dt) { return (dt instanceof Date ? dt : new Date(dt)).toISOString(); }
 
 async function getSinceTimestamp() {
-  // Default incremental from ledger; DEMO backfills from DEMO_D1 if set
   try {
     const rows = await sbSelect(`${RUNS_TABLE}?select=inat_updated_through_utc&order=inat_updated_through_utc.desc&limit=1`);
     const last = rows?.[0]?.inat_updated_through_utc;
@@ -218,7 +213,6 @@ async function reconcileDeletes(sinceIso, presentCols) {
     page += 1;
   }
 
-  // If we don't have an updated_at-like column, skip reconciliation (nothing to filter by)
   if (!presentCols.has(OBS_UPDATED_AT_COLUMN)) return [];
 
   const sel = encodeURIComponent(OBS_ID_COLUMN);
