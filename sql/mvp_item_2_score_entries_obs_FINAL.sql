@@ -37,8 +37,7 @@ CREATE INDEX IF NOT EXISTS score_entries_obs_user_idx
   ON public.score_entries_obs (user_login);
 
 COMMENT ON TABLE public.score_entries_obs IS
-  'Per-observation scoring detail. One row per observation per run. ' ||
-  'Separate from legacy score_entries (aggregated per student).';
+  'Per-observation scoring detail. One row per observation per run. Separate from legacy score_entries (aggregated per student).';
 
 -- ============================================================================
 -- A2) Scoring RPC → writes into score_entries_obs (NOT the legacy table)
@@ -122,8 +121,7 @@ END$$;
 ALTER FUNCTION public.compute_scores_mvp SET search_path = public;
 
 COMMENT ON FUNCTION public.compute_scores_mvp IS
-  'Populates score_entries_obs (per-observation) for the latest run. ' ||
-  'Filters by active config_filters. Idempotent (deletes & rebuilds per run).';
+  'Populates score_entries_obs (per-observation) for the latest run. Filters by active config_filters. Idempotent (deletes & rebuilds per run).';
 
 -- ============================================================================
 -- A3) Retarget leaderboard view to the per-observation table (latest run)
@@ -147,8 +145,7 @@ WHERE se.run_id = (SELECT id FROM latest_run)
 GROUP BY se.user_login;
 
 COMMENT ON VIEW public.leaderboard_overall_latest_v1 IS
-  'Leaderboard for latest run, reading from score_entries_obs (per-observation). ' ||
-  'Aggregates to user level with obs_count, distinct_taxa, and timestamp ranges.';
+  'Leaderboard for latest run, reading from score_entries_obs (per-observation). Aggregates to user level with obs_count, distinct_taxa, and timestamp ranges.';
 
 -- Refresh the existing MV to pick up the new source
 REFRESH MATERIALIZED VIEW CONCURRENTLY public.leaderboard_overall_mv;
