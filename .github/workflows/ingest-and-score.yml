@@ -74,6 +74,28 @@ jobs:
       - name: "Run ingest"
         run: node ingest.mjs
 
+      - name: "Refresh leaderboard MV"
+        run: |
+          curl -sS -X POST \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            "$SUPABASE_URL/rest/v1/rpc/refresh_leaderboard_overall_mv"
+
+      - name: "Run DB audit (fail on violations)"
+        run: |
+          out=$(curl -sS -X POST \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            "$SUPABASE_URL/rest/v1/rpc/assert_security_and_perf_ok")
+          echo "$out"
+          # Empty array means OK
+          if [ "$out" != "[]" ]; then
+            echo "::error::DB audit violations found"
+            exit 1
+          fi
+
       - name: "Job summary"
         if: ${{ success() }}
         run: echo "✅ Ingest succeeded at $(date -u)" >> $GITHUB_STEP_SUMMARY
