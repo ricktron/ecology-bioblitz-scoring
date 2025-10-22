@@ -1,16 +1,18 @@
--- MVP Item #1: Swap leaderboard to score_entries (latest-run only) - CORRECTED
+-- MVP Item #1: Swap leaderboard to score_entries (latest-run only) - FINAL VERSION
 --
 -- Purpose: Replace the base leaderboard view to read from score_entries
 --          filtered to the latest score run, then refresh the materialized view.
 --
--- OUTDATED - Use mvp_item_1_leaderboard_swap_FINAL.sql instead
--- This version incorrectly assumed student_identities table was needed
+-- FINAL CORRECTED VERSION based on actual schema:
+--   - score_entries has: score_run_id, student_id, total_points, breakdown_json
+--   - roster has: id, display_name, inat_login (no separate student_identities join needed!)
+--   - obs_count calculated from breakdown_json (D + O + U + RG)
 --
--- Actual schema:
---   - roster table has inat_login directly (no student_identities join needed)
---   - Direct join: score_entries.student_id = roster.id
---
--- See: mvp_item_1_leaderboard_swap_FINAL.sql for the working version
+-- Instructions:
+--   1. Copy this SQL
+--   2. Go to Supabase Dashboard → SQL Editor
+--   3. Paste and execute
+--   4. Verify the MV refresh completes successfully
 
 -- Step 1: Replace the base view to read from score_entries (latest run only)
 CREATE OR REPLACE VIEW public.leaderboard_overall_latest_v1 AS
@@ -21,7 +23,7 @@ WITH latest_run AS (
   LIMIT 1
 )
 SELECT
-  si.provider_uid AS inat_login,
+  r.inat_login,
   r.display_name,
   -- Total points from score_entries
   SUM(se.total_points)::numeric AS total_points,
@@ -35,24 +37,33 @@ SELECT
   -- Additional metrics from breakdown_json
   SUM(COALESCE((se.breakdown_json->>'novelty_sum')::numeric, 0))::numeric AS novelty_sum,
   SUM(COALESCE((se.breakdown_json->>'rarity_sum')::numeric, 0))::numeric AS rarity_sum,
-  SUM(COALESCE((se.breakdown_json->>'assists_count')::int, 0))::int AS assists_count
+  SUM(COALESCE((se.breakdown_json->>'assists_count')::int, 0))::int AS assists_count,
+  -- Adult status (useful for filtering)
+  BOOL_OR(r.is_adult) AS is_adult
 FROM public.score_entries se
--- Join to roster to get student info
+-- Direct join to roster (inat_login is in roster table)
 JOIN public.roster r ON r.id = se.student_id
--- Join to student_identities to get inat_login
-JOIN public.student_identities si ON si.user_id = se.student_id AND si.provider = 'inat'
--- Filter to latest run only
+-- Filter to latest run only and exclude students marked for exclusion
 WHERE se.score_run_id = (SELECT id FROM latest_run)
-  AND COALESCE(si.active, true) = true
-GROUP BY si.provider_uid, r.display_name
+  AND COALESCE(r.exclude_from_scoring, false) = false
+GROUP BY r.inat_login, r.display_name
 ORDER BY total_points DESC, inat_login ASC;
 
 -- Step 2: Immediately refresh the existing materialized view to pick up the change
 REFRESH MATERIALIZED VIEW CONCURRENTLY public.leaderboard_overall_mv;
 
 -- Verification queries (optional - run after the above completes)
+--
 -- Check the updated leaderboard:
 -- SELECT * FROM public.leaderboard_overall_mv ORDER BY total_points DESC LIMIT 10;
-
+--
 -- Check which run we're using:
 -- SELECT id, started_at FROM public.score_runs ORDER BY started_at DESC LIMIT 1;
+--
+-- Check student vs adult breakdown:
+-- SELECT
+--   is_adult,
+--   COUNT(*) as count,
+--   SUM(total_points) as total_points
+-- FROM public.leaderboard_overall_mv
+-- GROUP BY is_adult;
