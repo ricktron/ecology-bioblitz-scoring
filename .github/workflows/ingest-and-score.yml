@@ -10,7 +10,9 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      # Required
+      OBS_TABLE: ${{ secrets.OBS_TABLE }}             # optional (defaults to "observations")
+      OBS_ID_COLUMN: ${{ secrets.OBS_ID_COLUMN }}     # REQUIRED if your PK isn't literally "id"
+      SKIP_DELETES: ${{ secrets.SKIP_DELETES }}       # optional: "true" to bypass delete pass
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY != '' && secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
       INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
