@@ -25,7 +25,7 @@ begin
     from pg_tables
     where schemaname = 'public'
       and tablename not like 'pg_%'
-      and tablename not in ('score_runs', 'spider_trip_windows_v1')  -- exclude ledger/config tables
+      and tablename not in ('score_runs', 'spider_trip_windows_v1', 'config_filters')  -- exclude ledger/config tables
       and not exists (
         select 1 from pg_class c
         where c.relname = tablename
