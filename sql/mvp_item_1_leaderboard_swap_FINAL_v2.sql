@@ -1,9 +1,10 @@
 -- MVP Item #1: Swap leaderboard to score_entries (latest-run only) - FINAL v2
 --
--- Purpose: Replace the base leaderboard view to read from score_entries
---          filtered to the latest score run, then refresh the materialized view.
+-- OUTDATED - Column order mismatch
+-- Use mvp_item_1_leaderboard_swap_FINAL_v3.sql instead
 --
--- v2: Fixed column name to match existing view (user_login, not inat_login)
+-- Issue: This version adds new columns (display_name, total_points, etc.)
+-- but existing view has different structure (user_login, obs_count, distinct_taxa, etc.)
 --
 -- Schema:
 --   - score_entries: score_run_id, student_id, total_points, breakdown_json
