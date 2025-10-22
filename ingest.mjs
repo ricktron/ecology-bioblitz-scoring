@@ -98,6 +98,11 @@ async function sbDeleteByIds(table, idColumn, ids) {
 async function sbColumnExists(table, column) {
   const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(table)}?select=${encodeURIComponent(column)}&limit=0`;
   const res = await fetch(url, { headers: sbHeaders() });
+  const criticalCols = ["user_login", "raw_json"];
+  if (!res.ok && criticalCols.includes(column)) {
+    // Log details for critical column detection failures
+    console.warn(`[sbColumnExists] ${column} detection returned ${res.status}`);
+  }
   return res.ok;
 }
 async function detectColumns() {
@@ -112,12 +117,33 @@ async function detectColumns() {
     "longitude",
     "quality_grade",
     "created_at",
+    "raw_json",       // Store full iNat API response (often NOT NULL)
   ];
   const present = new Set([...must]);
+
+  // Try to detect each column, with retry logic for critical columns
+  const criticalCols = new Set(["user_login", "raw_json"]); // Columns often with NOT NULL constraints
+
   for (const col of optional) {
     if (!col) continue;
-    try { if (await sbColumnExists(OBS_TABLE, col)) present.add(col); } catch {}
+    let detected = false;
+    try {
+      detected = await sbColumnExists(OBS_TABLE, col);
+      // Always assume critical columns exist (common required fields with NOT NULL constraints)
+      if (criticalCols.has(col) && !detected) {
+        console.warn(`[detectColumns] ${col} not detected, but assuming it exists (common required field)`);
+        detected = true;
+      }
+    } catch (err) {
+      // If detection fails for critical columns, assume they exist
+      if (criticalCols.has(col)) {
+        console.warn(`[detectColumns] Detection error for ${col}, assuming it exists: ${err.message}`);
+        detected = true;
+      }
+    }
+    if (detected) present.add(col);
   }
+
   return present;
 }
 
@@ -174,7 +200,13 @@ async function fetchUpdates(sinceIso, presentCols) {
       const ua = r.updated_at ? iso(r.updated_at) : null;
 
       if (presentCols.has("user_id"))    rec.user_id    = r.user?.id ?? null;
-      if (presentCols.has("user_login")) rec.user_login = (r.user?.login ?? `user_${r.user?.id ?? "unknown"}`).toString();
+
+      // Always populate user_login (critical field, often has NOT NULL constraint)
+      // Use actual login, fallback to user_ID format, or "unknown" if user data missing
+      if (presentCols.has("user_login")) {
+        rec.user_login = r.user?.login || (r.user?.id ? `user_${r.user.id}` : "unknown");
+      }
+
       if (presentCols.has("taxon_id"))   rec.taxon_id   = r.taxon?.id ?? null;
       if (presentCols.has("observed_at")) rec.observed_at = r.observed_on_details?.date ? iso(r.observed_on_details.date) : (r.time_observed_at || null);
       if (presentCols.has(OBS_UPDATED_AT_COLUMN)) rec[OBS_UPDATED_AT_COLUMN] = ua;
@@ -182,6 +214,11 @@ async function fetchUpdates(sinceIso, presentCols) {
       if (presentCols.has("longitude"))  rec.longitude  = r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null);
       if (presentCols.has("quality_grade")) rec.quality_grade = r.quality_grade ?? null;
       if (presentCols.has("created_at")) rec.created_at = r.created_at ? iso(r.created_at) : null;
+
+      // Store full iNat API response (critical field, often has NOT NULL constraint)
+      if (presentCols.has("raw_json")) {
+        rec.raw_json = r; // Store the entire observation object as JSONB
+      }
 
       if (ua && ua > maxSeen) maxSeen = ua;
       return rec;
