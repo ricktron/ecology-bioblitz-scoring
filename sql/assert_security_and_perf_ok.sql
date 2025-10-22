@@ -1,6 +1,9 @@
 -- Database audit function: checks for security and performance issues
 -- Returns empty array [] if OK, otherwise returns array of violation objects
 
+-- Drop existing function first (needed if return type changed from json to jsonb)
+drop function if exists public.assert_security_and_perf_ok();
+
 create or replace function public.assert_security_and_perf_ok()
 returns jsonb
 language plpgsql
