@@ -8,10 +8,11 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+
     env:
       # Required
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY != '' && secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
       INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
 
       # Mode + filters
@@ -25,22 +26,24 @@ jobs:
       TRIP_BBOX:        ${{ secrets.TRIP_BBOX }}
 
       # Flexible schema knobs
-      OBS_TABLE:              ${{ secrets.OBS_TABLE }}
-      OBS_ID_COLUMN:          ${{ secrets.OBS_ID_COLUMN }}
-      OBS_UPDATED_AT_COLUMN:  ${{ secrets.OBS_UPDATED_AT_COLUMN }}
-      SKIP_DELETES:           ${{ secrets.SKIP_DELETES }}
+      OBS_TABLE:             ${{ secrets.OBS_TABLE }}
+      OBS_ID_COLUMN:         ${{ secrets.OBS_ID_COLUMN }}
+      OBS_UPDATED_AT_COLUMN: ${{ secrets.OBS_UPDATED_AT_COLUMN }}
+      SKIP_DELETES:          ${{ secrets.SKIP_DELETES }}
 
       # Optional alerting webhook
       ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: "Checkout"
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: "Setup Node"
+        uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Validate required env
+      - name: "Validate required env"
         shell: bash
         run: |
           set -euo pipefail
@@ -56,10 +59,10 @@ jobs:
           done
           [ "$ok" = "1" ] || exit 1
 
-      - name: Install deps (deterministic)
+      - name: "Install deps (deterministic)"
         run: npm ci
 
-      - name: Verify config_filters row exists
+      - name: "Verify config_filters row exists"
         shell: bash
         run: |
           set -euo pipefail
@@ -68,22 +71,16 @@ jobs:
           echo "config_filters lookup: $r"
           echo "$r" | grep -q "true" || (echo "::error::No active config_filters row in DB"; exit 1)
 
-      - name: Preflight: list columns (first row keys)
-        run: |
-          curl -sS -H "apikey: $SUPABASE_SERVICE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
-            "$SUPABASE_URL/rest/v1/${OBS_TABLE:-observations}?select=*&limit=1" \
-            | jq '.[0] | keys'
-
-      - name: Run ingest
+      - name: "Run ingest"
         run: node ingest.mjs
 
-      - name: Job summary
-        if: success()
+      - name: "Job summary"
+        if: ${{ success() }}
         run: echo "✅ Ingest succeeded at $(date -u)" >> $GITHUB_STEP_SUMMARY
 
-      - name: Notify on failure (webhook)
-        if: failure() && env.ALERT_WEBHOOK_URL != ''
+      - name: "Notify on failure (webhook)"
+        if: ${{ failure() && env.ALERT_WEBHOOK_URL != '' }}
         shell: bash
         run: |
-          payload='{"text":"❌ EcoQuest ingest failed: '"$GITHUB_REPOSITORY"' run '"$GITHUB_RUN_ID"' commit '"$GITHUB_SHA"'"}'
-          curl -sS -X POST -H 'Content-Type: application/json' -d "$payload" "$ALERT_WEBHOOK_URL"
+          printf '{"text":"%s"}' "❌ EcoQuest ingest failed: ${GITHUB_REPOSITORY} run ${GITHUB_RUN_ID} commit ${GITHUB_SHA}" \
+            | curl -sS -X POST -H 'Content-Type: application/json' -d @- "$ALERT_WEBHOOK_URL"
