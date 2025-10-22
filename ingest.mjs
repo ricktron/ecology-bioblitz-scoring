@@ -14,7 +14,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL.replace(/\/+$/, "");
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const INAT_PROJECT_SLUG = process.env.INAT_PROJECT_SLUG;
 
-// Flexible schema knobs (set via GH Secrets)
+// Flexible schema knobs (via GH Secrets)
 const OBS_TABLE = process.env.OBS_TABLE || "observations";
 const OBS_ID_COLUMN = process.env.OBS_ID_COLUMN || "id";            // e.g., "inat_obs_id"
 const OBS_UPDATED_AT_COLUMN = process.env.OBS_UPDATED_AT_COLUMN || "updated_at";
@@ -30,6 +30,7 @@ const TRIP_D1 = process.env.TRIP_D1 || "";
 const TRIP_D2 = process.env.TRIP_D2 || "";
 const TRIP_BBOX = (process.env.TRIP_BBOX || "").split(",").map(Number);
 
+// Tunables
 const SAFETY_OVERLAP_SECONDS = 30;
 const PER_PAGE = 200;
 const MAX_PAGES = 200;
@@ -103,6 +104,7 @@ async function detectColumns() {
   const must = new Set([OBS_ID_COLUMN]); // must exist
   const optional = [
     "user_id",
+    "user_login",     // NEW: map iNat username if column exists (often NOT NULL)
     "taxon_id",
     "observed_at",
     OBS_UPDATED_AT_COLUMN,
@@ -170,14 +172,17 @@ async function fetchUpdates(sinceIso, presentCols) {
     const rows = results.map(r => {
       const rec = { [OBS_ID_COLUMN]: r.id };
       const ua = r.updated_at ? iso(r.updated_at) : null;
-      if (presentCols.has("user_id")) rec.user_id = r.user?.id ?? null;
-      if (presentCols.has("taxon_id")) rec.taxon_id = r.taxon?.id ?? null;
+
+      if (presentCols.has("user_id"))    rec.user_id    = r.user?.id ?? null;
+      if (presentCols.has("user_login")) rec.user_login = (r.user?.login ?? `user_${r.user?.id ?? "unknown"}`).toString();
+      if (presentCols.has("taxon_id"))   rec.taxon_id   = r.taxon?.id ?? null;
       if (presentCols.has("observed_at")) rec.observed_at = r.observed_on_details?.date ? iso(r.observed_on_details.date) : (r.time_observed_at || null);
       if (presentCols.has(OBS_UPDATED_AT_COLUMN)) rec[OBS_UPDATED_AT_COLUMN] = ua;
-      if (presentCols.has("latitude"))  rec.latitude  = r.geojson?.coordinates ? r.geojson.coordinates[1] : (r.latitude ?? null);
-      if (presentCols.has("longitude")) rec.longitude = r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null);
+      if (presentCols.has("latitude"))   rec.latitude   = r.geojson?.coordinates ? r.geojson.coordinates[1] : (r.latitude ?? null);
+      if (presentCols.has("longitude"))  rec.longitude  = r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null);
       if (presentCols.has("quality_grade")) rec.quality_grade = r.quality_grade ?? null;
       if (presentCols.has("created_at")) rec.created_at = r.created_at ? iso(r.created_at) : null;
+
       if (ua && ua > maxSeen) maxSeen = ua;
       return rec;
     });
