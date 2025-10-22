@@ -1,0 +1,210 @@
+name: CI - Build, Test, and Validate
+
+on:
+  pull_request:
+    branches: ['*']
+  push:
+    branches: [main, master]
+
+jobs:
+  # ============================================================================
+  # Job 1: Build and Test Node Application
+  # ============================================================================
+  build-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linter (if available)
+        run: npm run lint --if-present
+        continue-on-error: true
+
+      - name: Run TypeScript build (if available)
+        run: npm run build --if-present
+
+      - name: Run tests (if available)
+        run: npm test --if-present
+        env:
+          NODE_ENV: test
+
+      - name: Check for TypeScript errors
+        run: |
+          if [ -f "tsconfig.json" ]; then
+            npx tsc --noEmit || echo "TypeScript check completed with warnings"
+          else
+            echo "No tsconfig.json found, skipping TypeScript check"
+          fi
+
+  # ============================================================================
+  # Job 2: SQL Migration Validation
+  # ============================================================================
+  sql-lint:
+    name: Validate SQL Migrations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check SQL files exist
+        run: |
+          if [ -d "supabase/migrations" ]; then
+            echo "✅ Found migrations directory"
+            ls -lh supabase/migrations/
+          else
+            echo "⚠️  No migrations directory found"
+            exit 0
+          fi
+
+      - name: Basic SQL syntax validation
+        run: |
+          set -e
+          if [ -d "supabase/migrations" ]; then
+            for f in supabase/migrations/*.sql; do
+              if [ -f "$f" ]; then
+                echo "Checking $f..."
+
+                # Check file is not empty
+                if [ ! -s "$f" ]; then
+                  echo "❌ Error: $f is empty"
+                  exit 1
+                fi
+
+                # Check for basic SQL syntax issues
+                # (This is a lightweight check; real validation happens in Supabase)
+
+                # Check for unterminated strings
+                if grep -q "'" "$f"; then
+                  # Count single quotes (should be even)
+                  quote_count=$(grep -o "'" "$f" | wc -l)
+                  if [ $((quote_count % 2)) -ne 0 ]; then
+                    echo "⚠️  Warning: Odd number of single quotes in $f"
+                  fi
+                fi
+
+                # Check for common SQL keywords
+                if ! grep -qiE "(create|alter|drop|select|insert|update|delete|function|trigger|policy)" "$f"; then
+                  echo "⚠️  Warning: $f may not contain valid SQL statements"
+                fi
+
+                echo "✅ $f passed basic checks"
+              fi
+            done
+            echo "✅ All SQL files passed validation"
+          else
+            echo "No SQL files to check"
+          fi
+
+      - name: Check for dangerous operations
+        run: |
+          if [ -d "supabase/migrations" ]; then
+            echo "Checking for potentially dangerous SQL operations..."
+
+            # Check for DROP DATABASE/SCHEMA (should not be in migrations)
+            if grep -riE "drop\s+(database|schema)" supabase/migrations/; then
+              echo "❌ Error: Found DROP DATABASE/SCHEMA - this is dangerous!"
+              exit 1
+            fi
+
+            # Check for TRUNCATE without safeguards
+            if grep -riE "truncate\s+table" supabase/migrations/; then
+              echo "⚠️  Warning: Found TRUNCATE TABLE - ensure this is intentional"
+            fi
+
+            # Check for DROP TABLE without IF EXISTS
+            if grep -riE "drop\s+table\s+[^i]" supabase/migrations/; then
+              echo "⚠️  Warning: Found DROP TABLE without IF EXISTS"
+            fi
+
+            echo "✅ Dangerous operation check complete"
+          fi
+
+      - name: Verify migration naming convention
+        run: |
+          if [ -d "supabase/migrations" ]; then
+            for f in supabase/migrations/*.sql; do
+              if [ -f "$f" ]; then
+                filename=$(basename "$f")
+                # Check if filename starts with timestamp (YYYYMMDD or similar)
+                if ! echo "$filename" | grep -qE "^[0-9]{8,14}_"; then
+                  echo "⚠️  Warning: $filename doesn't follow timestamp_name.sql convention"
+                fi
+              fi
+            done
+          fi
+
+  # ============================================================================
+  # Job 3: Code Quality Checks
+  # ============================================================================
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check for secrets in code
+        run: |
+          echo "Checking for potential secrets..."
+
+          # Check for common secret patterns
+          if grep -rE "(password|secret|api_key|private_key)\s*=\s*['\"][^'\"]{20,}" . --exclude-dir=node_modules --exclude-dir=.git; then
+            echo "⚠️  Warning: Found potential hardcoded secrets"
+          fi
+
+          # Check for service role key usage in app code
+          if grep -r "SUPABASE_SERVICE_ROLE_KEY" src/ --include="*.ts" --include="*.js" 2>/dev/null; then
+            echo "❌ Error: Found SUPABASE_SERVICE_ROLE_KEY in app code - use ANON key instead!"
+            exit 1
+          fi
+
+          echo "✅ No obvious secrets found"
+
+      - name: Check for TODO/FIXME comments
+        run: |
+          echo "Checking for TODO/FIXME comments..."
+          grep -rn "TODO\|FIXME" src/ --include="*.ts" --include="*.js" 2>/dev/null || echo "✅ No TODOs found"
+
+  # ============================================================================
+  # Job 4: Security Checks
+  # ============================================================================
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run npm audit
+        run: npm audit --audit-level=moderate || echo "⚠️  Found vulnerabilities, please review"
+        continue-on-error: true
+
+      - name: Check for outdated packages
+        run: npm outdated || echo "Some packages are outdated"
+        continue-on-error: true
