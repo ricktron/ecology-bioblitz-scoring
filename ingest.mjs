@@ -1,5 +1,5 @@
 // ingest.mjs
-// EcoQuest Live — P1 hardening + DEMO/TRIP toggle + flexible table/columns
+// EcoQuest Live — P1 hardening + DEMO/TRIP toggle + flexible table/columns + column autodetect
 // Node 20+, ESM ("type": "module" in package.json)
 
 const REQUIRED_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "INAT_PROJECT_SLUG"];
@@ -94,10 +94,39 @@ async function sbDeleteByIds(table, idColumn, ids) {
   return { count: total };
 }
 
+// --- schema autodetect helpers ---
+async function sbColumnExists(table, column) {
+  // Probe column existence: 200 if exists, 400 if not
+  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(table)}?select=${encodeURIComponent(column)}&limit=0`;
+  const res = await fetch(url, { headers: sbHeaders() });
+  return res.ok;
+}
+async function detectColumns() {
+  const mandatory = new Set([OBS_ID_COLUMN]); // must exist
+  const optionalNames = [
+    "user_id",
+    "taxon_id",
+    "observed_at",
+    OBS_UPDATED_AT_COLUMN, // may equal "updated_at"
+    "latitude",
+    "longitude",
+    "quality_grade",
+    "created_at",
+  ];
+  const present = new Set([...mandatory]);
+  for (const col of optionalNames) {
+    if (!col) continue;
+    try {
+      if (await sbColumnExists(OBS_TABLE, col)) present.add(col);
+    } catch { /* ignore */ }
+  }
+  return present;
+}
+
 function iso(dt) { return (dt instanceof Date ? dt : new Date(dt)).toISOString(); }
 
 async function getSinceTimestamp() {
-  // Default: last ledger (minus overlap). DEMO override: backfill from DEMO_D1.
+  // Default incremental from ledger; DEMO backfills from DEMO_D1 if set
   try {
     const rows = await sbSelect(`${RUNS_TABLE}?select=inat_updated_through_utc&order=inat_updated_through_utc.desc&limit=1`);
     const last = rows?.[0]?.inat_updated_through_utc;
@@ -135,7 +164,7 @@ function buildQueryParams({ page, perPage, sinceIso }) {
   return base;
 }
 
-async function fetchUpdates(sinceIso) {
+async function fetchUpdates(sinceIso, presentCols) {
   let page = 1, maxSeen = sinceIso, totalUpserted = 0;
   while (page <= MAX_PAGES) {
     const url = iNatUrl("observations", buildQueryParams({ page, perPage: PER_PAGE, sinceIso }));
@@ -143,25 +172,24 @@ async function fetchUpdates(sinceIso) {
     const results = data?.results ?? [];
     if (!results.length) break;
 
-    const rows = results.map(r => ({
-      [OBS_ID_COLUMN]: r.id,
-      user_id: r.user?.id ?? null,
-      taxon_id: r.taxon?.id ?? null,
-      observed_at: r.observed_on_details?.date ? iso(r.observed_on_details.date) : (r.time_observed_at || null),
-      [OBS_UPDATED_AT_COLUMN]: r.updated_at ? iso(r.updated_at) : null,
-      latitude: r.geojson?.coordinates ? r.geojson.coordinates[1] : (r.latitude ?? null),
-      longitude: r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null),
-      quality_grade: r.quality_grade ?? null,
-      created_at: r.created_at ? iso(r.created_at) : null,
-    }));
+    const rows = results.map(r => {
+      const rec = { [OBS_ID_COLUMN]: r.id };
+      const ua = r.updated_at ? iso(r.updated_at) : null;
+      if (presentCols.has("user_id")) rec.user_id = r.user?.id ?? null;
+      if (presentCols.has("taxon_id")) rec.taxon_id = r.taxon?.id ?? null;
+      if (presentCols.has("observed_at")) rec.observed_at = r.observed_on_details?.date ? iso(r.observed_on_details.date) : (r.time_observed_at || null);
+      if (presentCols.has(OBS_UPDATED_AT_COLUMN)) rec[OBS_UPDATED_AT_COLUMN] = ua;
+      if (presentCols.has("latitude"))  rec.latitude  = r.geojson?.coordinates ? r.geojson.coordinates[1] : (r.latitude ?? null);
+      if (presentCols.has("longitude")) rec.longitude = r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null);
+      if (presentCols.has("quality_grade")) rec.quality_grade = r.quality_grade ?? null;
+      if (presentCols.has("created_at")) rec.created_at = r.created_at ? iso(r.created_at) : null;
+      if (ua && ua > maxSeen) maxSeen = ua;
+      return rec;
+    });
 
     await sbUpsert(OBS_TABLE, rows, OBS_ID_COLUMN);
     totalUpserted += rows.length;
 
-    for (const r of rows) {
-      const ua = r[OBS_UPDATED_AT_COLUMN];
-      if (ua && ua > maxSeen) maxSeen = ua;
-    }
     if (results.length < PER_PAGE) break;
     page += 1;
   }
@@ -177,7 +205,7 @@ async function fetchDeletedIdsSince(sinceIso) {
   } catch { return null; }
 }
 
-async function reconcileDeletes(sinceIso) {
+async function reconcileDeletes(sinceIso, presentCols) {
   const current = new Set();
   let page = 1;
   while (page <= 50) {
@@ -189,6 +217,9 @@ async function reconcileDeletes(sinceIso) {
     if (results.length < PER_PAGE) break;
     page += 1;
   }
+
+  // If we don't have an updated_at-like column, skip reconciliation (nothing to filter by)
+  if (!presentCols.has(OBS_UPDATED_AT_COLUMN)) return [];
 
   const sel = encodeURIComponent(OBS_ID_COLUMN);
   const upd = encodeURIComponent(OBS_UPDATED_AT_COLUMN);
@@ -216,19 +247,22 @@ async function main() {
   const since = await getSinceTimestamp();
   const sinceIso = iso(since);
 
+  const presentCols = await detectColumns();
+
   console.log(JSON.stringify({
     mode: INAT_MODE,
     table: OBS_TABLE,
     id_column: OBS_ID_COLUMN,
     updated_at_column: OBS_UPDATED_AT_COLUMN,
+    present_columns: [...presentCols],
     params_preview: buildQueryParams({ page: 1, perPage: PER_PAGE, sinceIso })
   }));
 
-  const { totalUpserted, maxSeen } = await fetchUpdates(sinceIso);
+  const { totalUpserted, maxSeen } = await fetchUpdates(sinceIso, presentCols);
 
   let deletedIds = [];
   if (!SKIP_DELETES) {
-    deletedIds = await fetchDeletedIdsSince(sinceIso) ?? await reconcileDeletes(sinceIso);
+    deletedIds = await fetchDeletedIdsSince(sinceIso) ?? await reconcileDeletes(sinceIso, presentCols);
     if (deletedIds.length) await sbDeleteByIds(OBS_TABLE, OBS_ID_COLUMN, deletedIds);
   } else {
     console.log("[deletes] SKIP_DELETES=true — skipping deletions this run");
