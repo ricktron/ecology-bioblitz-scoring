@@ -1,5 +1,5 @@
 // ingest.mjs
-// EcoQuest Live — P1 hardening + DEMO/TRIP toggle + flexible ID column
+// EcoQuest Live — P1 hardening + DEMO/TRIP toggle + flexible table/columns
 // Node 20+, ESM ("type": "module" in package.json)
 
 const REQUIRED_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "INAT_PROJECT_SLUG"];
@@ -14,20 +14,23 @@ const SUPABASE_URL = process.env.SUPABASE_URL.replace(/\/+$/, "");
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const INAT_PROJECT_SLUG = process.env.INAT_PROJECT_SLUG;
 
-// NEW: make table/PK configurable
+// Flexible schema knobs (set via GH Secrets)
 const OBS_TABLE = process.env.OBS_TABLE || "observations";
-const OBS_ID_COLUMN = process.env.OBS_ID_COLUMN || "id"; // e.g., "observation_id"
+const OBS_ID_COLUMN = process.env.OBS_ID_COLUMN || "id";            // e.g., "inat_obs_id"
+const OBS_UPDATED_AT_COLUMN = process.env.OBS_UPDATED_AT_COLUMN || "updated_at";
 const SKIP_DELETES = String(process.env.SKIP_DELETES || "").toLowerCase() === "true";
 
-const INAT_MODE = (process.env.INAT_MODE || "TRIP").toUpperCase(); // DEMO or TRIP
+const INAT_MODE = (process.env.INAT_MODE || "TRIP").toUpperCase();  // DEMO or TRIP
 const DEMO_D1 = process.env.DEMO_D1 || "";
 const DEMO_D2 = process.env.DEMO_D2 || "";
 const DEMO_BBOX = (process.env.DEMO_BBOX || "").split(",").map(Number);
 const DEMO_USER_LOGINS = (process.env.DEMO_USER_LOGINS || "").split(",").map(s => s.trim()).filter(Boolean);
+
 const TRIP_D1 = process.env.TRIP_D1 || "";
 const TRIP_D2 = process.env.TRIP_D2 || "";
 const TRIP_BBOX = (process.env.TRIP_BBOX || "").split(",").map(Number);
 
+// Tunables
 const SAFETY_OVERLAP_SECONDS = 30;
 const PER_PAGE = 200;
 const MAX_PAGES = 200;
@@ -57,20 +60,14 @@ async function fetchJson(url, { method = "GET", headers = {}, body, retryLabel }
 }
 
 function sbHeaders() {
-  return {
-    apikey: SUPABASE_KEY,
-    Authorization: `Bearer ${SUPABASE_KEY}`,
-    "Content-Type": "application/json",
-  };
+  return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" };
 }
-
 async function sbSelect(path) {
   const url = `${SUPABASE_URL}/rest/v1/${path}`;
   const res = await fetch(url, { headers: sbHeaders() });
   if (!res.ok) throw new Error(`Supabase SELECT ${path} → ${res.status} ${await res.text()}`);
   return await res.json();
 }
-
 async function sbUpsert(table, rows, onConflict) {
   if (!rows.length) return { count: 0 };
   const qs = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : "";
@@ -83,7 +80,6 @@ async function sbUpsert(table, rows, onConflict) {
   if (!res.ok) throw new Error(`Supabase UPSERT ${table} → ${res.status} ${await res.text()}`);
   return { count: rows.length };
 }
-
 async function sbDeleteByIds(table, idColumn, ids) {
   if (!ids.length) return { count: 0 };
   let total = 0;
@@ -101,13 +97,16 @@ async function sbDeleteByIds(table, idColumn, ids) {
 function iso(dt) { return (dt instanceof Date ? dt : new Date(dt)).toISOString(); }
 
 async function getSinceTimestamp() {
+  // Default: last ledger (minus overlap). DEMO override: backfill from DEMO_D1.
   try {
     const rows = await sbSelect(`${RUNS_TABLE}?select=inat_updated_through_utc&order=inat_updated_through_utc.desc&limit=1`);
     const last = rows?.[0]?.inat_updated_through_utc;
     const base = last ? new Date(last) : new Date(0);
-    return new Date(base.getTime() - SAFETY_OVERLAP_SECONDS * 1000);
+    const ledgerSince = new Date(base.getTime() - SAFETY_OVERLAP_SECONDS * 1000);
+    if (INAT_MODE === "DEMO" && DEMO_D1) return new Date(`${DEMO_D1}T00:00:00Z`);
+    return ledgerSince;
   } catch {
-    return new Date(0); // bootstrap
+    return (INAT_MODE === "DEMO" && DEMO_D1) ? new Date(`${DEMO_D1}T00:00:00Z`) : new Date(0);
   }
 }
 
@@ -120,15 +119,13 @@ function iNatUrl(path, params) {
 function buildQueryParams({ page, perPage, sinceIso }) {
   if (INAT_MODE === "DEMO") {
     const [swlat, swlng, nelat, nelng] = DEMO_BBOX.length === 4 ? DEMO_BBOX : [null, null, null, null];
-    const base = {
-      order: "asc", order_by: "updated_at", updated_since: sinceIso,
-      per_page: String(perPage), page: String(page),
-      d1: DEMO_D1, d2: DEMO_D2, swlat, swlng, nelat, nelng,
-    };
+    const base = { order: "asc", order_by: "updated_at", updated_since: sinceIso, per_page: String(perPage), page: String(page),
+                   d1: DEMO_D1, d2: DEMO_D2, swlat, swlng, nelat, nelng };
     if (DEMO_USER_LOGINS.length) base.user_login = DEMO_USER_LOGINS.join(",");
     return base;
   }
-  const base = { project_slug: INAT_PROJECT_SLUG, order: "asc", order_by: "updated_at", updated_since: sinceIso, per_page: String(perPage), page: String(page) };
+  const base = { project_slug: INAT_PROJECT_SLUG, order: "asc", order_by: "updated_at", updated_since: sinceIso,
+                 per_page: String(perPage), page: String(page) };
   if (TRIP_D1) base.d1 = TRIP_D1;
   if (TRIP_D2) base.d2 = TRIP_D2;
   if (TRIP_BBOX.length === 4) {
@@ -146,13 +143,12 @@ async function fetchUpdates(sinceIso) {
     const results = data?.results ?? [];
     if (!results.length) break;
 
-    // map into your DB column names
     const rows = results.map(r => ({
       [OBS_ID_COLUMN]: r.id,
       user_id: r.user?.id ?? null,
       taxon_id: r.taxon?.id ?? null,
       observed_at: r.observed_on_details?.date ? iso(r.observed_on_details.date) : (r.time_observed_at || null),
-      updated_at: r.updated_at ? iso(r.updated_at) : null,
+      [OBS_UPDATED_AT_COLUMN]: r.updated_at ? iso(r.updated_at) : null,
       latitude: r.geojson?.coordinates ? r.geojson.coordinates[1] : (r.latitude ?? null),
       longitude: r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null),
       quality_grade: r.quality_grade ?? null,
@@ -162,7 +158,10 @@ async function fetchUpdates(sinceIso) {
     await sbUpsert(OBS_TABLE, rows, OBS_ID_COLUMN);
     totalUpserted += rows.length;
 
-    for (const r of rows) if (r.updated_at && r.updated_at > maxSeen) maxSeen = r.updated_at;
+    for (const r of rows) {
+      const ua = r[OBS_UPDATED_AT_COLUMN];
+      if (ua && ua > maxSeen) maxSeen = ua;
+    }
     if (results.length < PER_PAGE) break;
     page += 1;
   }
@@ -171,21 +170,14 @@ async function fetchUpdates(sinceIso) {
 
 async function fetchDeletedIdsSince(sinceIso) {
   try {
-    const url = iNatUrl("observations/deleted", {
-      project_slug: INAT_PROJECT_SLUG,
-      updated_since: sinceIso,
-      per_page: String(PER_PAGE),
-    });
+    const url = iNatUrl("observations/deleted", { project_slug: INAT_PROJECT_SLUG, updated_since: sinceIso, per_page: String(PER_PAGE) });
     const data = await fetchJson(url, { retryLabel: "iNat deletions" });
     const results = data?.results ?? [];
     return results.map(r => r.id).filter(Boolean);
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
 async function reconcileDeletes(sinceIso) {
-  // Build current ID universe from iNat in the window
   const current = new Set();
   let page = 1;
   while (page <= 50) {
@@ -198,9 +190,9 @@ async function reconcileDeletes(sinceIso) {
     page += 1;
   }
 
-  // Pull recent Supabase IDs using whichever column name you have
-  const sel = encodeURIComponent(`${OBS_ID_COLUMN}`);
-  const rows = await sbSelect(`${OBS_TABLE}?select=${sel}&updated_at=gte.${sinceIso}`);
+  const sel = encodeURIComponent(OBS_ID_COLUMN);
+  const upd = encodeURIComponent(OBS_UPDATED_AT_COLUMN);
+  const rows = await sbSelect(`${OBS_TABLE}?select=${sel}&${upd}=gte.${sinceIso}`);
   const supabaseRecent = new Set(rows.map(x => String(x[OBS_ID_COLUMN])));
   const toDelete = [...supabaseRecent].filter(id => !current.has(id));
   return toDelete;
@@ -228,6 +220,7 @@ async function main() {
     mode: INAT_MODE,
     table: OBS_TABLE,
     id_column: OBS_ID_COLUMN,
+    updated_at_column: OBS_UPDATED_AT_COLUMN,
     params_preview: buildQueryParams({ page: 1, perPage: PER_PAGE, sinceIso })
   }));
 
@@ -245,12 +238,7 @@ async function main() {
   const maxSeenIso = maxSeen || sinceIso;
   await recordRun(maxSeenIso, { startedAt, endedAt, upserts: totalUpserted, deletes: deletedIds.length });
 
-  console.log(JSON.stringify({
-    status: "ok",
-    upserts: totalUpserted,
-    deletes: deletedIds.length,
-    inat_updated_through_utc: maxSeenIso
-  }));
+  console.log(JSON.stringify({ status: "ok", upserts: totalUpserted, deletes: deletedIds.length, inat_updated_through_utc: maxSeenIso }));
 }
 
 main().catch(err => {
