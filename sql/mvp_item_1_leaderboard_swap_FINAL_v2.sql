@@ -1,10 +1,20 @@
--- MVP Item #1: Swap leaderboard to score_entries (latest-run only) - FINAL VERSION
+-- MVP Item #1: Swap leaderboard to score_entries (latest-run only) - FINAL v2
 --
--- OUTDATED - Column name issue: tried to rename user_login to inat_login
--- Use mvp_item_1_leaderboard_swap_FINAL_v2.sql instead
+-- Purpose: Replace the base leaderboard view to read from score_entries
+--          filtered to the latest score run, then refresh the materialized view.
 --
--- Issue: Existing view has column "user_login" and PostgreSQL won't let us
--- rename it via CREATE OR REPLACE VIEW. v2 keeps the same column name.
+-- v2: Fixed column name to match existing view (user_login, not inat_login)
+--
+-- Schema:
+--   - score_entries: score_run_id, student_id, total_points, breakdown_json
+--   - roster: id, display_name, inat_login, is_adult, exclude_from_scoring
+--   - Direct join: score_entries.student_id = roster.id
+--
+-- Instructions:
+--   1. Copy this SQL
+--   2. Go to Supabase Dashboard → SQL Editor
+--   3. Paste and execute
+--   4. Verify the MV refresh completes successfully
 
 -- Step 1: Replace the base view to read from score_entries (latest run only)
 CREATE OR REPLACE VIEW public.leaderboard_overall_latest_v1 AS
@@ -15,7 +25,7 @@ WITH latest_run AS (
   LIMIT 1
 )
 SELECT
-  r.inat_login,
+  r.inat_login AS user_login,  -- Aliased to match existing view column name
   r.display_name,
   -- Total points from score_entries
   SUM(se.total_points)::numeric AS total_points,
@@ -39,7 +49,7 @@ JOIN public.roster r ON r.id = se.student_id
 WHERE se.score_run_id = (SELECT id FROM latest_run)
   AND COALESCE(r.exclude_from_scoring, false) = false
 GROUP BY r.inat_login, r.display_name
-ORDER BY total_points DESC, inat_login ASC;
+ORDER BY total_points DESC, user_login ASC;
 
 -- Step 2: Immediately refresh the existing materialized view to pick up the change
 REFRESH MATERIALIZED VIEW CONCURRENTLY public.leaderboard_overall_mv;
