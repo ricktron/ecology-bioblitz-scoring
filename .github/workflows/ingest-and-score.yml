@@ -9,6 +9,10 @@ jobs:
   run:
     runs-on: ubuntu-latest
 
+    concurrency:
+      group: ingest-and-score
+      cancel-in-progress: true
+
     env:
       # Required
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -90,8 +94,7 @@ jobs:
             -H "Content-Type: application/json" \
             "$SUPABASE_URL/rest/v1/rpc/assert_security_and_perf_ok")
           echo "$out"
-          # Empty array means OK
-          if [ "$out" != "[]" ]; then
+          if [ "$(echo "$out" | jq 'length')" != "0" ]; then
             echo "::error::DB audit violations found"
             exit 1
           fi
