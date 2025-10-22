@@ -98,8 +98,9 @@ async function sbDeleteByIds(table, idColumn, ids) {
 async function sbColumnExists(table, column) {
   const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(table)}?select=${encodeURIComponent(column)}&limit=0`;
   const res = await fetch(url, { headers: sbHeaders() });
-  if (!res.ok && column === "user_login") {
-    // Log details for user_login detection failures
+  const criticalCols = ["user_login", "raw_json"];
+  if (!res.ok && criticalCols.includes(column)) {
+    // Log details for critical column detection failures
     console.warn(`[sbColumnExists] ${column} detection returned ${res.status}`);
   }
   return res.ok;
@@ -116,23 +117,26 @@ async function detectColumns() {
     "longitude",
     "quality_grade",
     "created_at",
+    "raw_json",       // Store full iNat API response (often NOT NULL)
   ];
   const present = new Set([...must]);
 
   // Try to detect each column, with retry logic for critical columns
+  const criticalCols = new Set(["user_login", "raw_json"]); // Columns often with NOT NULL constraints
+
   for (const col of optional) {
     if (!col) continue;
     let detected = false;
     try {
       detected = await sbColumnExists(OBS_TABLE, col);
-      // Always assume user_login exists (common required field with NOT NULL constraint)
-      if (col === "user_login" && !detected) {
+      // Always assume critical columns exist (common required fields with NOT NULL constraints)
+      if (criticalCols.has(col) && !detected) {
         console.warn(`[detectColumns] ${col} not detected, but assuming it exists (common required field)`);
         detected = true;
       }
     } catch (err) {
-      // If detection fails for user_login, assume it exists (common required field)
-      if (col === "user_login") {
+      // If detection fails for critical columns, assume they exist
+      if (criticalCols.has(col)) {
         console.warn(`[detectColumns] Detection error for ${col}, assuming it exists: ${err.message}`);
         detected = true;
       }
@@ -210,6 +214,11 @@ async function fetchUpdates(sinceIso, presentCols) {
       if (presentCols.has("longitude"))  rec.longitude  = r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null);
       if (presentCols.has("quality_grade")) rec.quality_grade = r.quality_grade ?? null;
       if (presentCols.has("created_at")) rec.created_at = r.created_at ? iso(r.created_at) : null;
+
+      // Store full iNat API response (critical field, often has NOT NULL constraint)
+      if (presentCols.has("raw_json")) {
+        rec.raw_json = r; // Store the entire observation object as JSONB
+      }
 
       if (ua && ua > maxSeen) maxSeen = ua;
       return rec;
