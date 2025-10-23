@@ -5,7 +5,6 @@ on:
   schedule:
     - cron: "*/15 * * * *"
 
-# Single concurrency scope to avoid deadlocks across branches
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -13,7 +12,6 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    # (No job-level "concurrency:" here.)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -45,9 +43,10 @@ jobs:
         run: |
           set -euo pipefail
           K="${SUPABASE_SERVICE_KEY:-${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}}"
-          r=$(curl -sS -H "apikey: $K" -H "Authorization: Bearer $K"               "$SUPABASE_URL/rest/v1/config_filters?id=is.${INAT_PROJECT_SLUG}&select=id")
+          url="$SUPABASE_URL/rest/v1/config_filters?slug=eq.${INAT_PROJECT_SLUG}&select=id"
+          r=$(curl -sS -H "apikey: $K" -H "Authorization: Bearer $K" "$url")
           echo "config_filters lookup: $r"
-          echo "$r" | grep -q "${INAT_PROJECT_SLUG}" || (echo "::error::No active config_filters row in DB"; exit 1)
+          echo "$r" | grep -q '"id"' || (echo "::error::No active config_filters row in DB"; exit 1)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
@@ -71,12 +70,12 @@ jobs:
           SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
-          INAT_MODE: ${{ vars.INAT_MODE }}
-          TRIP_D1: ${{ vars.TRIP_D1 }}
-          TRIP_D2: ${{ vars.TRIP_D2 }}
-          TRIP_BBOX: ${{ vars.TRIP_BBOX }}
-          OBS_TABLE: ${{ vars.OBS_TABLE }}
-          OBS_ID_COLUMN: ${{ vars.OBS_ID_COLUMN }}
-          OBS_UPDATED_AT_COLUMN: ${{ vars.OBS_UPDATED_AT_COLUMN }}
-          SKIP_DELETES: ${{ vars.SKIP_DELETES }}
+          INAT_MODE: ${{ secrets.INAT_MODE }}
+          TRIP_D1: ${{ secrets.TRIP_D1 }}
+          TRIP_D2: ${{ secrets.TRIP_D2 }}
+          TRIP_BBOX: ${{ secrets.TRIP_BBOX }}
+          OBS_TABLE: ${{ secrets.OBS_TABLE }}
+          OBS_ID_COLUMN: ${{ secrets.OBS_ID_COLUMN }}
+          OBS_UPDATED_AT_COLUMN: ${{ secrets.OBS_UPDATED_AT_COLUMN }}
+          SKIP_DELETES: ${{ secrets.SKIP_DELETES }}
           ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
