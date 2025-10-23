@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "*/15 * * * *"
 
+concurrency:
+  group: ingest-and-score
+  cancel-in-progress: true
+
 jobs:
   run:
     runs-on: ubuntu-latest
@@ -94,6 +98,14 @@ jobs:
             -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
             -H "Content-Type: application/json" \
             "$SUPABASE_URL/rest/v1/rpc/refresh_leaderboard_overall_mv"
+
+      - name: "Refresh daily leaderboard MV"
+        run: |
+          curl -sS -X POST \
+            -H "apikey: $SUPABASE_SERVICE_KEY" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" \
+            -H "Content-Type: application/json" \
+            "$SUPABASE_URL/rest/v1/rpc/refresh_leaderboard_daily_mv"
 
       - name: "Run DB audit (fail on violations)"
         run: |
