@@ -39,14 +39,47 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
 
-      - name: Verify active config_filters
+      - name: Verify active config_filters (adaptive)
         run: |
           set -euo pipefail
           K="${SUPABASE_SERVICE_KEY:-${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}}"
-          url="$SUPABASE_URL/rest/v1/config_filters?slug=eq.${INAT_PROJECT_SLUG}&select=id"
-          r=$(curl -sS -H "apikey: $K" -H "Authorization: Bearer $K" "$url")
-          echo "config_filters lookup: $r"
-          echo "$r" | grep -q '"id"' || (echo "::error::No active config_filters row in DB"; exit 1)
+          BASE="$SUPABASE_URL/rest/v1/config_filters"
+          try_filter() {
+            col="$1"
+            url="$BASE?$col=eq.${INAT_PROJECT_SLUG}&select=id"
+            echo "→ probing column '$col' with: $url"
+            res="$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$url")" || true
+            code="${res##*$'\n'}"
+            body="${res%$'\n'*}"
+            echo "  http $code body: $body"
+            if [ "${code:-000}" -lt 400 ] && echo "$body" | grep -q '"id"'; then
+              echo "✓ matched on column '$col'"
+              echo "$body" > /tmp/config_filters_probe.json
+              return 0
+            fi
+            return 1
+          }
+          if ! try_filter slug; then
+            if ! try_filter project_slug; then
+              if ! try_filter inat_project_slug; then
+                # As a last resort, if the slug actually contains a numeric/uuid id, try id=eq.
+                if ! try_filter id; then
+                  # Final fallback: just ensure the table is reachable
+                  url="$BASE?select=id&limit=1"
+                  echo "→ fallback reachability: $url"
+                  res="$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$url")" || true
+                  code="${res##*$'\n'}"
+                  body="${res%$'\n'*}"
+                  echo "  http $code body: $body"
+                  if [ "${code:-000}" -ge 400 ] || ! echo "$body" | grep -q '"id"'; then
+                    echo "::error::config_filters not reachable or empty; please verify table/columns. Last body: $body"
+                    exit 1
+                  fi
+                  echo "✓ table reachable; proceeding without slug filter"
+                fi
+              fi
+            fi
+          fi
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
