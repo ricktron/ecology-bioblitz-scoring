@@ -94,6 +94,39 @@ async function sbDeleteByIds(table, idColumn, ids) {
   return { count: total };
 }
 
+// ---------- Chunked UPSERT wrapper (drop-in) ----------
+// Tune batch size via env UPSERT_BATCH_SIZE (default 100)
+const UPSERT_BATCH_SIZE = parseInt(process.env.UPSERT_BATCH_SIZE || "100", 10);
+/**
+ * upsertInChunks: calls sbUpsert in small batches to avoid PostgREST 57014 (statement timeout)
+ * Preserves Prefer header and all sbUpsert behavior. No DB/RPC signature changes.
+ */
+async function upsertInChunks(table, rows, onConflict) {
+  if (!rows || !rows.length) return { count: 0 };
+  let total = 0;
+  for (let i = 0; i < rows.length; i += UPSERT_BATCH_SIZE) {
+    const slice = rows.slice(i, i + UPSERT_BATCH_SIZE);
+    // Tiny internal retry for transient 5xx/429/timeout per chunk
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const r = await sbUpsert(table, slice, onConflict);
+        total += r.count || slice.length;
+        break;
+      } catch (err) {
+        const msg = String((err && err.message) || err || "");
+        if (attempt < 2 && /(?:^|[^a-z])(5\d\d|429|timeout)/i.test(msg)) {
+          const backoffMs = 500 * attempt;
+          console.warn(`[UPSERT CHUNK RETRY ${attempt}] ${msg} — sleeping ${backoffMs}ms`);
+          await new Promise(r => setTimeout(r, backoffMs));
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+  return { count: total };
+}
+
 // ---------- schema autodetect ----------
 async function sbColumnExists(table, column) {
   const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(table)}?select=${encodeURIComponent(column)}&limit=0`;
@@ -224,8 +257,9 @@ async function fetchUpdates(sinceIso, presentCols) {
       return rec;
     });
 
-    await sbUpsert(OBS_TABLE, rows, OBS_ID_COLUMN);
-    totalUpserted += rows.length;
+    // CHANGED: use chunked upsert to avoid timeouts
+    const up = await upsertInChunks(OBS_TABLE, rows, OBS_ID_COLUMN);
+    totalUpserted += up.count || rows.length;
 
     if (results.length < PER_PAGE) break;
     page += 1;
