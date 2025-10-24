@@ -97,18 +97,19 @@ jobs:
             echo "⚠️ transient failure, retry #$i"; sleep $(( (RANDOM % 7 + 5) * i ))
           done
           echo "::error::Ingest failed after 3 attempts"; exit 1
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-          INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
-          INAT_MODE: ${{ secrets.INAT_MODE }}
-          TRIP_D1: ${{ secrets.TRIP_D1 }}
-          TRIP_D2: ${{ secrets.TRIP_D2 }}
-          TRIP_BBOX: ${{ secrets.TRIP_BBOX }}
-          OBS_TABLE: ${{ secrets.OBS_TABLE }}
-          OBS_ID_COLUMN: ${{ secrets.OBS_ID_COLUMN }}
-          OBS_UPDATED_AT_COLUMN: ${{ secrets.OBS_UPDATED_AT_COLUMN }}
-          SKIP_DELETES: ${{ secrets.SKIP_DELETES }}
-          ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+  SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
+  INAT_MODE: ${{ secrets.INAT_MODE }}
+  TRIP_D1: ${{ secrets.TRIP_D1 }}
+  TRIP_D2: ${{ secrets.TRIP_D2 }}
+  TRIP_BBOX: ${{ secrets.TRIP_BBOX }}
+  OBS_TABLE: ${{ secrets.OBS_TABLE }}
+  OBS_ID_COLUMN: ${{ secrets.OBS_ID_COLUMN }}
+  OBS_UPDATED_AT_COLUMN: ${{ secrets.OBS_UPDATED_AT_COLUMN }}
+  SKIP_DELETES: ${{ secrets.SKIP_DELETES }}
+  ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+  **UPSERT_BATCH_SIZE: 100**   
