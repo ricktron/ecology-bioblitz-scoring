@@ -1,317 +1,388 @@
 // ingest.mjs
-// EcoQuest Live — P1 hardening + DEMO/TRIP toggle + flexible table/columns + column autodetect
-// Node 20+, ESM ("type": "module" in package.json)
+// iNaturalist → Supabase observation ingest (ESM, Node 20+, no external deps)
+// Handles: incremental sync, robust retry, auto batch shrinking on timeout
 
-const REQUIRED_ENV = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "INAT_PROJECT_SLUG"];
-for (const k of REQUIRED_ENV) {
-  if (!process.env[k] || !String(process.env[k]).trim()) {
-    console.error(`Missing required env: ${k}`);
-    process.exit(1);
-  }
-}
+// ============================================================================
+// CONFIGURATION & VALIDATION
+// ============================================================================
 
-const SUPABASE_URL = process.env.SUPABASE_URL.replace(/\/+$/, "");
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const SUPABASE_URL = process.env.SUPABASE_URL?.replace(/\/+$/, "");
+const SUPABASE_KEY = 
+  process.env.SUPABASE_SERVICE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 const INAT_PROJECT_SLUG = process.env.INAT_PROJECT_SLUG;
 
-// Flexible schema knobs (via GH Secrets)
-const OBS_TABLE = process.env.OBS_TABLE || "observations";
-const OBS_ID_COLUMN = process.env.OBS_ID_COLUMN || "id";            // e.g., "inat_obs_id"
-const OBS_UPDATED_AT_COLUMN = process.env.OBS_UPDATED_AT_COLUMN || "updated_at";
-const SKIP_DELETES = String(process.env.SKIP_DELETES || "").toLowerCase() === "true";
+if (!SUPABASE_URL || !SUPABASE_KEY || !INAT_PROJECT_SLUG) {
+  console.error("❌ Missing required envs: SUPABASE_URL, one of SUPABASE_*_KEY, INAT_PROJECT_SLUG");
+  process.exit(1);
+}
 
-const INAT_MODE = (process.env.INAT_MODE || "TRIP").toUpperCase();  // DEMO or TRIP
-const DEMO_D1 = process.env.DEMO_D1 || "";
-const DEMO_D2 = process.env.DEMO_D2 || "";
-const DEMO_BBOX = (process.env.DEMO_BBOX || "").split(",").map(Number);
-const DEMO_USER_LOGINS = (process.env.DEMO_USER_LOGINS || "").split(",").map(s => s.trim()).filter(Boolean);
-
+// Optional config
+const INAT_MODE = (process.env.INAT_MODE || "TRIP").toUpperCase();
 const TRIP_D1 = process.env.TRIP_D1 || "";
 const TRIP_D2 = process.env.TRIP_D2 || "";
-const TRIP_BBOX = (process.env.TRIP_BBOX || "").split(",").map(Number);
+const TRIP_BBOX = process.env.TRIP_BBOX ? process.env.TRIP_BBOX.split(",").map(Number) : [];
+const OBS_TABLE = process.env.OBS_TABLE || "observations";
+const OBS_ID_COLUMN = process.env.OBS_ID_COLUMN || "id";
+const OBS_UPDATED_AT_COLUMN = process.env.OBS_UPDATED_AT_COLUMN || "updated_at";
+const SKIP_DELETES = String(process.env.SKIP_DELETES || "").toLowerCase() === "true";
+const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL || "";
 
-// Tunables
-const SAFETY_OVERLAP_SECONDS = 30;
-const PER_PAGE = 200;
-const MAX_PAGES = 200;
+// Performance tuning - default to safer 50, can override to 100 via env
+let UPSERT_BATCH_SIZE = parseInt(process.env.UPSERT_BATCH_SIZE || "50", 10);
+const MIN_BATCH_SIZE = 10;
+
+// Retry config
 const MAX_RETRIES = 6;
 const BASE_WAIT_MS = 500;
-const RUNS_TABLE = "score_runs";
-const USER_AGENT = "EcoQuestLive/ingest (+contact: maintainer)";
+const USER_AGENT = "ecology-bioblitz/1.0 (+github actions)";
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+// ============================================================================
+// UTILITIES
+// ============================================================================
 
-async function fetchJson(url, { method = "GET", headers = {}, body, retryLabel } = {}) {
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await fetch(url, { method, body, headers: { "User-Agent": USER_AGENT, ...headers } });
-      if (res.status === 429) {
-        const retryAfter = Number(res.headers.get("retry-after")) || 2;
-        await sleep((retryAfter + attempt) * 1000);
-        continue;
-      }
-      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-      return await res.json();
-    } catch (err) {
-      if (attempt === MAX_RETRIES) throw new Error(`${retryLabel || "fetch"} failed: ${err.message}`);
-      await sleep(BASE_WAIT_MS * Math.pow(2, attempt));
-    }
-  }
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+function jitter(ms) {
+  return ms + Math.random() * 1000;
+}
+
+function iso(dt) {
+  return (dt instanceof Date ? dt : new Date(dt)).toISOString();
+}
+
+// ============================================================================
+// SUPABASE API
+// ============================================================================
 
 function sbHeaders() {
-  return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" };
+  return {
+    apikey: SUPABASE_KEY,
+    Authorization: `Bearer ${SUPABASE_KEY}`,
+    "Content-Type": "application/json",
+  };
 }
+
 async function sbSelect(path) {
   const url = `${SUPABASE_URL}/rest/v1/${path}`;
   const res = await fetch(url, { headers: sbHeaders() });
-  if (!res.ok) throw new Error(`Supabase SELECT ${path} → ${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Supabase SELECT ${path} → ${res.status} ${text}`);
+  }
   return await res.json();
 }
-async function sbUpsert(table, rows, onConflict) {
+
+async function sbUpsert(table, rows, onConflict, batchSize = UPSERT_BATCH_SIZE) {
   if (!rows.length) return { count: 0 };
+  
   const qs = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : "";
   const url = `${SUPABASE_URL}/rest/v1/${table}${qs}`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
-    body: JSON.stringify(rows),
-  });
-  if (!res.ok) throw new Error(`Supabase UPSERT ${table} → ${res.status} ${await res.text()}`);
-  return { count: rows.length };
-}
-async function sbDeleteByIds(table, idColumn, ids) {
-  if (!ids.length) return { count: 0 };
-  let total = 0;
-  const chunk = 5000;
-  for (let i = 0; i < ids.length; i += chunk) {
-    const slice = ids.slice(i, i + chunk).map(x => encodeURIComponent(x));
-    const url = `${SUPABASE_URL}/rest/v1/${table}?${encodeURIComponent(idColumn)}=in.(${slice.join(",")})`;
-    const res = await fetch(url, { method: "DELETE", headers: sbHeaders() });
-    if (!res.ok) throw new Error(`Supabase DELETE ${table} → ${res.status} ${await res.text()}`);
-    total += slice.length;
-  }
-  return { count: total };
-}
-
-// ---------- schema autodetect ----------
-async function sbColumnExists(table, column) {
-  const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(table)}?select=${encodeURIComponent(column)}&limit=0`;
-  const res = await fetch(url, { headers: sbHeaders() });
-  const criticalCols = ["user_login", "raw_json"];
-  if (!res.ok && criticalCols.includes(column)) {
-    // Log details for critical column detection failures
-    console.warn(`[sbColumnExists] ${column} detection returned ${res.status}`);
-  }
-  return res.ok;
-}
-async function detectColumns() {
-  const must = new Set([OBS_ID_COLUMN]); // must exist
-  const optional = [
-    "user_id",
-    "user_login",     // NEW: map iNat username if column exists (often NOT NULL)
-    "taxon_id",
-    "observed_at",
-    OBS_UPDATED_AT_COLUMN,
-    "latitude",
-    "longitude",
-    "quality_grade",
-    "created_at",
-    "raw_json",       // Store full iNat API response (often NOT NULL)
-  ];
-  const present = new Set([...must]);
-
-  // Try to detect each column, with retry logic for critical columns
-  const criticalCols = new Set(["user_login", "raw_json"]); // Columns often with NOT NULL constraints
-
-  for (const col of optional) {
-    if (!col) continue;
-    let detected = false;
+  
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      detected = await sbColumnExists(OBS_TABLE, col);
-      // Always assume critical columns exist (common required fields with NOT NULL constraints)
-      if (criticalCols.has(col) && !detected) {
-        console.warn(`[detectColumns] ${col} not detected, but assuming it exists (common required field)`);
-        detected = true;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { 
+          ...sbHeaders(), 
+          Prefer: "resolution=merge-duplicates,return=minimal" 
+        },
+        body: JSON.stringify(rows),
+      });
+      
+      if (res.ok) {
+        return { count: rows.length };
       }
+      
+      const text = await res.text();
+      
+      // Handle statement timeout (57014) by auto-shrinking batch
+      if (res.status === 500 && text.includes("57014") && batchSize > MIN_BATCH_SIZE) {
+        const newBatchSize = Math.max(MIN_BATCH_SIZE, Math.floor(batchSize / 2));
+        console.warn(`⚠️  Statement timeout (57014) detected. Shrinking batch ${batchSize} → ${newBatchSize}`);
+        
+        // Split current batch and retry recursively
+        const mid = Math.ceil(rows.length / 2);
+        const left = rows.slice(0, mid);
+        const right = rows.slice(mid);
+        
+        const r1 = await sbUpsert(table, left, onConflict, newBatchSize);
+        const r2 = await sbUpsert(table, right, onConflict, newBatchSize);
+        
+        return { count: r1.count + r2.count };
+      }
+      
+      // Retry on 5xx
+      if (res.status >= 500 && attempt < MAX_RETRIES) {
+        const waitMs = jitter(BASE_WAIT_MS * Math.pow(2, attempt));
+        console.warn(`⚠️  [UPSERT CHUNK RETRY ${attempt + 1}] ${res.status} ${text.substring(0, 100)}`);
+        await sleep(waitMs);
+        continue;
+      }
+      
+      throw new Error(`Supabase UPSERT ${table} → ${res.status} ${text}`);
     } catch (err) {
-      // If detection fails for critical columns, assume they exist
-      if (criticalCols.has(col)) {
-        console.warn(`[detectColumns] Detection error for ${col}, assuming it exists: ${err.message}`);
-        detected = true;
-      }
+      if (attempt === MAX_RETRIES) throw err;
+      const waitMs = jitter(BASE_WAIT_MS * Math.pow(2, attempt));
+      console.warn(`⚠️  [UPSERT CHUNK RETRY ${attempt + 1}] ${err.message}`);
+      await sleep(waitMs);
     }
-    if (detected) present.add(col);
   }
-
-  return present;
 }
 
-function iso(dt) { return (dt instanceof Date ? dt : new Date(dt)).toISOString(); }
-
-async function getSinceTimestamp() {
+async function sbColumnExists(table, column) {
   try {
-    const rows = await sbSelect(`${RUNS_TABLE}?select=inat_updated_through_utc&order=inat_updated_through_utc.desc&limit=1`);
-    const last = rows?.[0]?.inat_updated_through_utc;
-    const base = last ? new Date(last) : new Date(0);
-    const ledgerSince = new Date(base.getTime() - SAFETY_OVERLAP_SECONDS * 1000);
-    if (INAT_MODE === "DEMO" && DEMO_D1) return new Date(`${DEMO_D1}T00:00:00Z`);
-    return ledgerSince;
+    const url = `${SUPABASE_URL}/rest/v1/${encodeURIComponent(table)}?select=${encodeURIComponent(column)}&limit=0`;
+    const res = await fetch(url, { headers: sbHeaders() });
+    return res.ok;
   } catch {
-    return (INAT_MODE === "DEMO" && DEMO_D1) ? new Date(`${DEMO_D1}T00:00:00Z`) : new Date(0);
+    return false;
   }
 }
 
-function iNatUrl(path, params) {
-  const u = new URL(`https://api.inaturalist.org/v1/${path}`);
-  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null && v !== "") u.searchParams.set(k, v); });
-  return u.toString();
+// ============================================================================
+// INAT API
+// ============================================================================
+
+async function fetchJson(url, { retryLabel = "fetch", maxRetries = MAX_RETRIES } = {}) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept: "application/json",
+        },
+      });
+      
+      // Handle rate limiting
+      if (res.status === 429) {
+        const retryAfter = parseInt(res.headers.get("retry-after") || "5", 10);
+        const waitMs = (retryAfter + attempt) * 1000;
+        console.warn(`⚠️  [${retryLabel}] 429 rate limit, waiting ${waitMs}ms`);
+        await sleep(waitMs);
+        continue;
+      }
+      
+      // Handle forbidden (may be transient)
+      if (res.status === 403) {
+        if (attempt < maxRetries) {
+          const waitMs = jitter(BASE_WAIT_MS * Math.pow(2, attempt));
+          console.warn(`⚠️  [${retryLabel}] 403 forbidden, retry in ${waitMs}ms`);
+          await sleep(waitMs);
+          continue;
+        }
+      }
+      
+      // Handle 5xx
+      if (res.status >= 500 && attempt < maxRetries) {
+        const waitMs = jitter(BASE_WAIT_MS * Math.pow(2, attempt));
+        console.warn(`⚠️  [${retryLabel}] ${res.status} server error, retry in ${waitMs}ms`);
+        await sleep(waitMs);
+        continue;
+      }
+      
+      if (!res.ok) {
+        throw new Error(`${res.status} ${res.statusText}`);
+      }
+      
+      return await res.json();
+    } catch (err) {
+      if (attempt === maxRetries) {
+        throw new Error(`${retryLabel} failed: ${err.message}`);
+      }
+      const waitMs = jitter(BASE_WAIT_MS * Math.pow(2, attempt));
+      console.warn(`⚠️  [${retryLabel}] Error: ${err.message}, retry in ${waitMs}ms`);
+      await sleep(waitMs);
+    }
+  }
 }
 
-function buildQueryParams({ page, perPage, sinceIso }) {
-  if (INAT_MODE === "DEMO") {
-    const [swlat, swlng, nelat, nelng] = DEMO_BBOX.length === 4 ? DEMO_BBOX : [null, null, null, null];
-    const base = { order: "asc", order_by: "updated_at", updated_since: sinceIso, per_page: String(perPage), page: String(page),
-                   d1: DEMO_D1, d2: DEMO_D2, swlat, swlng, nelat, nelng };
-    if (DEMO_USER_LOGINS.length) base.user_login = DEMO_USER_LOGINS.join(",");
-    return base;
+function buildInatUrl(page, perPage, updatedSince) {
+  const base = "https://api.inaturalist.org/v1/observations";
+  const params = new URLSearchParams({
+    project_slug: INAT_PROJECT_SLUG,
+    order: "asc",
+    order_by: "updated_at",
+    per_page: String(perPage),
+    page: String(page),
+  });
+  
+  if (updatedSince) {
+    params.set("updated_since", updatedSince);
   }
-  const base = { project_slug: INAT_PROJECT_SLUG, order: "asc", order_by: "updated_at", updated_since: sinceIso,
-                 per_page: String(perPage), page: String(page) };
-  if (TRIP_D1) base.d1 = TRIP_D1;
-  if (TRIP_D2) base.d2 = TRIP_D2;
+  
+  if (TRIP_D1) params.set("d1", TRIP_D1);
+  if (TRIP_D2) params.set("d2", TRIP_D2);
+  
   if (TRIP_BBOX.length === 4) {
     const [swlat, swlng, nelat, nelng] = TRIP_BBOX;
-    Object.assign(base, { swlat, swlng, nelat, nelng });
+    params.set("swlat", swlat);
+    params.set("swlng", swlng);
+    params.set("nelat", nelat);
+    params.set("nelng", nelng);
   }
-  return base;
+  
+  return `${base}?${params.toString()}`;
 }
 
-async function fetchUpdates(sinceIso, presentCols) {
-  let page = 1, maxSeen = sinceIso, totalUpserted = 0;
-  while (page <= MAX_PAGES) {
-    const url = iNatUrl("observations", buildQueryParams({ page, perPage: PER_PAGE, sinceIso }));
-    const data = await fetchJson(url, { retryLabel: "iNat updates" });
-    const results = data?.results ?? [];
-    if (!results.length) break;
+// ============================================================================
+// INCREMENTAL SYNC
+// ============================================================================
 
-    const rows = results.map(r => {
-      const rec = { [OBS_ID_COLUMN]: r.id };
-      const ua = r.updated_at ? iso(r.updated_at) : null;
-
-      if (presentCols.has("user_id"))    rec.user_id    = r.user?.id ?? null;
-
-      // Always populate user_login (critical field, often has NOT NULL constraint)
-      // Use actual login, fallback to user_ID format, or "unknown" if user data missing
-      if (presentCols.has("user_login")) {
-        rec.user_login = r.user?.login || (r.user?.id ? `user_${r.user.id}` : "unknown");
-      }
-
-      if (presentCols.has("taxon_id"))   rec.taxon_id   = r.taxon?.id ?? null;
-      if (presentCols.has("observed_at")) rec.observed_at = r.observed_on_details?.date ? iso(r.observed_on_details.date) : (r.time_observed_at || null);
-      if (presentCols.has(OBS_UPDATED_AT_COLUMN)) rec[OBS_UPDATED_AT_COLUMN] = ua;
-      if (presentCols.has("latitude"))   rec.latitude   = r.geojson?.coordinates ? r.geojson.coordinates[1] : (r.latitude ?? null);
-      if (presentCols.has("longitude"))  rec.longitude  = r.geojson?.coordinates ? r.geojson.coordinates[0] : (r.longitude ?? null);
-      if (presentCols.has("quality_grade")) rec.quality_grade = r.quality_grade ?? null;
-      if (presentCols.has("created_at")) rec.created_at = r.created_at ? iso(r.created_at) : null;
-
-      // Store full iNat API response (critical field, often has NOT NULL constraint)
-      if (presentCols.has("raw_json")) {
-        rec.raw_json = r; // Store the entire observation object as JSONB
-      }
-
-      if (ua && ua > maxSeen) maxSeen = ua;
-      return rec;
-    });
-
-    await sbUpsert(OBS_TABLE, rows, OBS_ID_COLUMN);
-    totalUpserted += rows.length;
-
-    if (results.length < PER_PAGE) break;
-    page += 1;
-  }
-  return { totalUpserted, maxSeen };
-}
-
-async function fetchDeletedIdsSince(sinceIso) {
+async function getLastUpdatedAt() {
   try {
-    const url = iNatUrl("observations/deleted", { project_slug: INAT_PROJECT_SLUG, updated_since: sinceIso, per_page: String(PER_PAGE) });
-    const data = await fetchJson(url, { retryLabel: "iNat deletions" });
-    const results = data?.results ?? [];
-    return results.map(r => r.id).filter(Boolean);
-  } catch { return null; }
-}
-
-async function reconcileDeletes(sinceIso, presentCols) {
-  const current = new Set();
-  let page = 1;
-  while (page <= 50) {
-    const url = iNatUrl("observations", buildQueryParams({ page, perPage: PER_PAGE, sinceIso }));
-    const data = await fetchJson(url, { retryLabel: "iNat reconciliation updates" });
-    const results = data?.results ?? [];
-    if (!results.length) break;
-    for (const r of results) current.add(String(r.id));
-    if (results.length < PER_PAGE) break;
-    page += 1;
+    if (!OBS_UPDATED_AT_COLUMN) return null;
+    
+    const rows = await sbSelect(
+      `${OBS_TABLE}?select=${OBS_UPDATED_AT_COLUMN}&order=${OBS_UPDATED_AT_COLUMN}.desc&limit=1`
+    );
+    
+    if (rows && rows.length > 0 && rows[0][OBS_UPDATED_AT_COLUMN]) {
+      return new Date(rows[0][OBS_UPDATED_AT_COLUMN]);
+    }
+  } catch (err) {
+    console.warn(`⚠️  Could not fetch last ${OBS_UPDATED_AT_COLUMN}: ${err.message}`);
   }
-
-  if (!presentCols.has(OBS_UPDATED_AT_COLUMN)) return [];
-
-  const sel = encodeURIComponent(OBS_ID_COLUMN);
-  const upd = encodeURIComponent(OBS_UPDATED_AT_COLUMN);
-  const rows = await sbSelect(`${OBS_TABLE}?select=${sel}&${upd}=gte.${sinceIso}`);
-  const supabaseRecent = new Set(rows.map(x => String(x[OBS_ID_COLUMN])));
-  const toDelete = [...supabaseRecent].filter(id => !current.has(id));
-  return toDelete;
+  return null;
 }
 
-async function recordRun(maxSeenIso, stats) {
-  const row = [{
-    started_at: iso(stats.startedAt),
-    ended_at: iso(stats.endedAt),
-    inat_updated_through_utc: maxSeenIso,
-    notes: `ingest-only run (${INAT_MODE})`,
-    ingested_count: stats.upserts,
-    deleted_count: stats.deletes,
-  }];
-  try { await sbUpsert(RUNS_TABLE, row); }
-  catch (e) { console.warn("[recordRun] ledger write skipped:", e.message); }
+// ============================================================================
+// OBSERVATION NORMALIZATION
+// ============================================================================
+
+function normalizeObservation(obs) {
+  const row = {
+    [OBS_ID_COLUMN]: obs.id,
+    user_id: obs.user?.id ?? null,
+    user_login: obs.user?.login ?? null,
+    taxon_id: obs.taxon?.id ?? null,
+    observed_at: obs.observed_on_details?.date 
+      ? iso(obs.observed_on_details.date)
+      : (obs.time_observed_at || null),
+    [OBS_UPDATED_AT_COLUMN]: obs.updated_at ? iso(obs.updated_at) : null,
+    latitude: obs.geojson?.coordinates?.[1] ?? obs.latitude ?? null,
+    longitude: obs.geojson?.coordinates?.[0] ?? obs.longitude ?? null,
+    quality_grade: obs.quality_grade ?? null,
+    created_at: obs.created_at ? iso(obs.created_at) : null,
+    raw_json: obs, // Will be stringified by PostgREST
+  };
+  
+  return row;
 }
+
+// ============================================================================
+// MAIN INGEST
+// ============================================================================
 
 async function main() {
   const startedAt = new Date();
-  const since = await getSinceTimestamp();
-  const sinceIso = iso(since);
-
-  const presentCols = await detectColumns();
-
-  console.log(JSON.stringify({
+  
+  // Determine incremental sync point
+  const lastUpdated = await getLastUpdatedAt();
+  const updatedSince = lastUpdated ? iso(new Date(lastUpdated.getTime() - 30000)) : null; // 30s overlap
+  
+  // Check if soft delete column exists
+  const hasSoftDelete = await sbColumnExists(OBS_TABLE, "is_active");
+  
+  // Build params preview
+  const paramsPreview = {
     mode: INAT_MODE,
     table: OBS_TABLE,
     id_column: OBS_ID_COLUMN,
     updated_at_column: OBS_UPDATED_AT_COLUMN,
-    present_columns: [...presentCols],
-    params_preview: buildQueryParams({ page: 1, perPage: PER_PAGE, sinceIso })
-  }));
-
-  const { totalUpserted, maxSeen } = await fetchUpdates(sinceIso, presentCols);
-
-  let deletedIds = [];
-  if (!SKIP_DELETES) {
-    deletedIds = await fetchDeletedIdsSince(sinceIso) ?? await reconcileDeletes(sinceIso, presentCols);
-    if (deletedIds.length) await sbDeleteByIds(OBS_TABLE, OBS_ID_COLUMN, deletedIds);
-  } else {
-    console.log("[deletes] SKIP_DELETES=true — skipping deletions this run");
+    batch_size: UPSERT_BATCH_SIZE,
+    updated_since: updatedSince,
+    trip_d1: TRIP_D1 || null,
+    trip_d2: TRIP_D2 || null,
+    trip_bbox: TRIP_BBOX.length === 4 ? TRIP_BBOX : null,
+    skip_deletes: SKIP_DELETES,
+    has_soft_delete: hasSoftDelete,
+  };
+  
+  console.log(JSON.stringify(paramsPreview));
+  
+  // Fetch and upsert observations
+  let page = 1;
+  let totalUpserted = 0;
+  let maxSeenUpdatedAt = updatedSince;
+  const PER_PAGE = 200;
+  const MAX_PAGES = 200;
+  
+  while (page <= MAX_PAGES) {
+    const url = buildInatUrl(page, PER_PAGE, updatedSince);
+    const data = await fetchJson(url, { retryLabel: `iNat page ${page}` });
+    const results = data?.results ?? [];
+    
+    if (!results.length) break;
+    
+    const rows = results.map(normalizeObservation);
+    
+    // Track max updated_at for next run
+    for (const row of rows) {
+      const ua = row[OBS_UPDATED_AT_COLUMN];
+      if (ua && (!maxSeenUpdatedAt || ua > maxSeenUpdatedAt)) {
+        maxSeenUpdatedAt = ua;
+      }
+    }
+    
+    // Upsert in chunks
+    for (let i = 0; i < rows.length; i += UPSERT_BATCH_SIZE) {
+      const chunk = rows.slice(i, i + UPSERT_BATCH_SIZE);
+      await sbUpsert(OBS_TABLE, chunk, OBS_ID_COLUMN);
+      totalUpserted += chunk.length;
+    }
+    
+    if (results.length < PER_PAGE) break;
+    page++;
   }
-
+  
+  // Handle deletions (optional)
+  if (!SKIP_DELETES && hasSoftDelete) {
+    // Soft delete logic would go here if needed
+    console.log("ℹ️  Soft delete support detected but not implemented in this version");
+  }
+  
   const endedAt = new Date();
-  const maxSeenIso = maxSeen || sinceIso;
-  await recordRun(maxSeenIso, { startedAt, endedAt, upserts: totalUpserted, deletes: deletedIds.length });
-
-  console.log(JSON.stringify({ status: "ok", upserts: totalUpserted, deletes: deletedIds.length, inat_updated_through_utc: maxSeenIso }));
+  const duration = ((endedAt - startedAt) / 1000).toFixed(1);
+  
+  console.log(JSON.stringify({
+    status: "ok",
+    upserted: totalUpserted,
+    pages: page - 1,
+    duration_sec: parseFloat(duration),
+    max_seen_updated_at: maxSeenUpdatedAt,
+  }));
+  
+  console.log("✅ ingest ok");
 }
 
-main().catch(err => {
-  console.error("[INGEST FAILED]", err.stack || err.message);
+// ============================================================================
+// ERROR HANDLING & ALERTING
+// ============================================================================
+
+main().catch(async (err) => {
+  console.error(`❌ INGEST FAILED: ${err.message}`);
+  console.error(err.stack);
+  
+  // Send alert if webhook configured
+  if (ALERT_WEBHOOK_URL) {
+    try {
+      await fetch(ALERT_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stage: "ingest",
+          message: "iNaturalist ingest failed",
+          lastError: err.message,
+        }),
+      });
+    } catch {
+      // Ignore alert failures
+    }
+  }
+  
   process.exit(1);
 });
