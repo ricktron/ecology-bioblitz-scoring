@@ -1,85 +1,88 @@
-name: Ingest iNaturalist to Supabase
+name: Ingest iNaturalist -> Supabase
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: "Mode (TRIP or PROJECT)"
-        required: false
-        default: "TRIP"
   push:
     paths:
-      - ".github/workflows/ingest-and-score.yml"
-      - "ingest.mjs"
-  schedule:
-    - cron: "0 * * * *"  # hourly
+      - '.github/workflows/ingest-and-score.yml'
 
 concurrency:
-  group: ingest-inat
+  group: ingest-and-score
   cancel-in-progress: true
 
 jobs:
   ingest:
     name: Ingest iNaturalist -> Supabase
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 60
-    permissions:
-      contents: read
 
     env:
-      # ----- Required / Secrets -----
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      # ---- Supabase ----
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      # ----- Variables (set in repo or environment) -----
-      INAT_PROJECT_SLUG: ${{ vars.INAT_PROJECT_SLUG }}
-      INAT_MODE: ${{ vars.INAT_MODE }}
-      TRIP_D1: ${{ vars.TRIP_D1 }}
-      TRIP_D2: ${{ vars.TRIP_D2 }}
-      TRIP_BBOX: ${{ vars.TRIP_BBOX }}
-      OBS_TABLE: ${{ vars.OBS_TABLE }}
-      OBS_ID_COLUMN: ${{ vars.OBS_ID_COLUMN }}
-      OBS_UPDATED_AT_COLUMN: ${{ vars.OBS_UPDATED_AT_COLUMN }}
+
+      # ---- iNaturalist / Trip inputs ----
+      INAT_BASE: ${{ secrets.INAT_BASE || vars.INAT_BASE }}
+      INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG || vars.INAT_PROJECT_SLUG }}
+      INAT_MODE: ${{ secrets.INAT_MODE || vars.INAT_MODE }}
+      TRIP_D1: ${{ secrets.TRIP_D1 || vars.TRIP_D1 }}
+      TRIP_D2: ${{ secrets.TRIP_D2 || vars.TRIP_D2 }}
+      TRIP_BBOX: ${{ secrets.TRIP_BBOX || vars.TRIP_BBOX }}
+
+      # ---- Table mapping (defaults safe for your repo) ----
+      OBS_TABLE: ${{ vars.OBS_TABLE || 'observations' }}
+      OBS_ID_COLUMN: ${{ vars.OBS_ID_COLUMN || 'inat_obs_id' }}
+      OBS_UPDATED_AT_COLUMN: ${{ vars.OBS_UPDATED_AT_COLUMN || 'updated_at' }}
       SKIP_DELETES: ${{ vars.SKIP_DELETES }}
-      UPSERT_BATCH_SIZE: ${{ vars.UPSERT_BATCH_SIZE }}
-      ALERT_WEBHOOK_URL: ${{ vars.ALERT_WEBHOOK_URL }}
+      UPSERT_BATCH_SIZE: ${{ vars.UPSERT_BATCH_SIZE || 50 }}
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL || vars.ALERT_WEBHOOK_URL }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install dependencies
+      - name: Install deps (if package.json exists)
+        shell: bash
         run: |
           if [ -f package-lock.json ] || [ -f package.json ]; then
             npm ci --ignore-scripts --no-audit || npm i
           fi
 
-      - name: Environment check
+      - name: Environment sanity checks
         shell: bash
         run: |
           set -euo pipefail
           echo '=== Environment Check ==='
           ok=1
-          for v in SUPABASE_URL INAT_PROJECT_SLUG; do
-            val="${!v:-}"
-            if [ -z "$val" ]; then
-              echo "::error::Missing $v"; ok=0
-            else
-              echo "$v: present (len=${#val})"
-            fi
-          done
+
+          # Required always
+          if [ -z "${SUPABASE_URL:-}" ]; then
+            echo "::error::Missing SUPABASE_URL"; ok=0
+          else
+            echo "SUPABASE_URL: present (len=${#SUPABASE_URL})"
+          fi
+
+          # At least one Supabase key
           if [ -z "${SUPABASE_SERVICE_KEY:-}${SUPABASE_SECRET_KEY:-}${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
             echo "::error::Missing Supabase key (need SUPABASE_SERVICE_KEY or SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY)"
             ok=0
           else
             echo "Supabase key: present"
           fi
+
+          # Either a project slug OR any trip input must be provided
+          if [ -z "${INAT_PROJECT_SLUG:-}" ] && [ -z "${TRIP_D1:-}" ] && [ -z "${TRIP_BBOX:-}" ]; then
+            echo "::error::Provide either INAT_PROJECT_SLUG (project mode) OR TRIP_D1/ TRIP_BBOX (trip mode)"
+            ok=0
+          else
+            echo "Mode inputs: ok (project_slug=${INAT_PROJECT_SLUG:+set}, trip_d1=${TRIP_D1:+set}, bbox=${TRIP_BBOX:+set})"
+          fi
+
           [ "$ok" = "1" ] || exit 1
 
       - name: Supabase reachability test
@@ -90,17 +93,17 @@ jobs:
           K="${SUPABASE_SERVICE_KEY:-${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}}"
           URL="$SUPABASE_URL/rest/v1/config_filters?select=id&limit=1"
           echo "GET $URL"
-          r=$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$URL" || true)
+          r=$(curl -sS -w '
+%{http_code}'                 -H "apikey: $K"                 -H "Authorization: Bearer $K"                 "$URL" || true)
           code="${r##*$'\n'}"
           body="${r%$'\n'*}"
           echo "http $code body: $body"
           if [ "${code:-000}" -ge 400 ]; then
-            echo "::error::Supabase API unreachable"
-            exit 1
+            echo "::error::Supabase API unreachable"; exit 1
           fi
           echo '✓ Supabase API reachable'
 
-      - name: Ingest iNaturalist data (with retries)
+      - name: Run ingest with retries
         shell: bash
         run: |
           set -e
@@ -109,10 +112,10 @@ jobs:
               echo '✅ ingest ok'
               exit 0
             fi
-            if [ "$i" -lt 3 ]; then
+            if [ $i -lt 3 ]; then
               sleep_sec=$(( (RANDOM % 7 + 5) * i ))
               echo "⚠️  transient failure, retry #$i (sleeping ${sleep_sec}s)"
-              sleep "$sleep_sec"
+              sleep $sleep_sec
             fi
           done
           echo '::error::Ingest failed after 3 attempts'
