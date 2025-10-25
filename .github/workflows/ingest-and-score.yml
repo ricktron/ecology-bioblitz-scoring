@@ -1,27 +1,34 @@
-name: iNaturalist Ingest
+name: Ingest iNaturalist → Supabase
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/30 * * * *'  # Every 30 minutes
+    inputs:
+      run_mode:
+        description: 'Mode: TRIP or FULL'
+        default: 'TRIP'
+        required: false
 
-# Single workflow-level concurrency to avoid deadlocks
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ingest-inat-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   ingest:
-    name: Ingest iNaturalist → Supabase
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 120
 
     env:
+      # Supabase
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
+
+      # Inat + ingest options (use repo/environment VARIABLES)
+      INAT_PROJECT_SLUG: ${{ vars.INAT_PROJECT_SLUG }}
       INAT_MODE: ${{ vars.INAT_MODE }}
       TRIP_D1: ${{ vars.TRIP_D1 }}
       TRIP_D2: ${{ vars.TRIP_D2 }}
@@ -42,7 +49,8 @@ jobs:
         with:
           node-version: 20
 
-      - name: Preflight env check
+      - name: Environment Check
+        shell: bash
         run: |
           set -euo pipefail
           echo '=== Environment Check ==='
@@ -68,14 +76,16 @@ jobs:
 
           [ "$ok" = "1" ] || exit 1
 
-      - name: Supabase API reachability
+      - name: Supabase Reachability Test
+        shell: bash
         run: |
           set -euo pipefail
           echo '=== Supabase Reachability Test ==='
           K="${SUPABASE_SERVICE_KEY:-${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}}"
           URL="$SUPABASE_URL/rest/v1/config_filters?select=id&limit=1"
           echo "GET $URL"
-          r=$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$URL" || true)
+          r=$(curl -sS -w '
+%{http_code}'             -H "apikey: $K"             -H "Authorization: Bearer $K"             "$URL" || true)
           code="${r##*$'\n'}"
           body="${r%$'\n'*}"
           echo "http $code body: $body"
@@ -84,11 +94,20 @@ jobs:
           fi
           echo '✓ Supabase API reachable'
 
-      - name: Run ingest.mjs (3x retry with jitter)
+      - name: Install deps (if present)
+        shell: bash
+        run: |
+          set -e
+          if [ -f package.json ]; then
+            npm ci --ignore-scripts
+          fi
+
+      - name: Ingest with retries
+        shell: bash
         run: |
           set -e
           for i in 1 2 3; do
-            if node ingest.mjs; then
+            if stdbuf -oL -eL node ingest.mjs | tee /dev/stderr; then
               echo '✅ ingest ok'
               exit 0
             fi
@@ -100,7 +119,3 @@ jobs:
           done
           echo '::error::Ingest failed after 3 attempts'
           exit 1
-
-      - name: Summary
-        if: success()
-        run: echo "✅ Ingest completed at $(date -u)" >> $GITHUB_STEP_SUMMARY
