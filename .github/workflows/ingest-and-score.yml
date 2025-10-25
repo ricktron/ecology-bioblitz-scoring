@@ -1,33 +1,38 @@
-name: Ingest iNaturalist → Supabase
+name: Ingest iNaturalist to Supabase
 
 on:
   workflow_dispatch:
     inputs:
-      run_mode:
-        description: 'Mode: TRIP or FULL'
-        default: 'TRIP'
+      mode:
+        description: "Mode (TRIP or PROJECT)"
         required: false
+        default: "TRIP"
+  push:
+    paths:
+      - ".github/workflows/ingest-and-score.yml"
+      - "ingest.mjs"
+  schedule:
+    - cron: "0 * * * *"  # hourly
 
 concurrency:
-  group: ingest-inat-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
-
-permissions:
-  contents: read
+  group: ingest-inat
+  cancel-in-progress: true
 
 jobs:
   ingest:
+    name: Ingest iNaturalist -> Supabase
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 60
+    permissions:
+      contents: read
 
     env:
-      # Supabase
+      # ----- Required / Secrets -----
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
-      # Inat + ingest options (use repo/environment VARIABLES)
+      # ----- Variables (set in repo or environment) -----
       INAT_PROJECT_SLUG: ${{ vars.INAT_PROJECT_SLUG }}
       INAT_MODE: ${{ vars.INAT_MODE }}
       TRIP_D1: ${{ vars.TRIP_D1 }}
@@ -38,7 +43,7 @@ jobs:
       OBS_UPDATED_AT_COLUMN: ${{ vars.OBS_UPDATED_AT_COLUMN }}
       SKIP_DELETES: ${{ vars.SKIP_DELETES }}
       UPSERT_BATCH_SIZE: ${{ vars.UPSERT_BATCH_SIZE }}
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+      ALERT_WEBHOOK_URL: ${{ vars.ALERT_WEBHOOK_URL }}
 
     steps:
       - name: Checkout
@@ -49,14 +54,18 @@ jobs:
         with:
           node-version: 20
 
-      - name: Environment Check
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ] || [ -f package.json ]; then
+            npm ci --ignore-scripts --no-audit || npm i
+          fi
+
+      - name: Environment check
         shell: bash
         run: |
           set -euo pipefail
           echo '=== Environment Check ==='
           ok=1
-
-          # Required vars
           for v in SUPABASE_URL INAT_PROJECT_SLUG; do
             val="${!v:-}"
             if [ -z "$val" ]; then
@@ -65,18 +74,15 @@ jobs:
               echo "$v: present (len=${#val})"
             fi
           done
-
-          # At least one Supabase key
           if [ -z "${SUPABASE_SERVICE_KEY:-}${SUPABASE_SECRET_KEY:-}${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
             echo "::error::Missing Supabase key (need SUPABASE_SERVICE_KEY or SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY)"
             ok=0
           else
             echo "Supabase key: present"
           fi
-
           [ "$ok" = "1" ] || exit 1
 
-      - name: Supabase Reachability Test
+      - name: Supabase reachability test
         shell: bash
         run: |
           set -euo pipefail
@@ -84,37 +90,29 @@ jobs:
           K="${SUPABASE_SERVICE_KEY:-${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}}"
           URL="$SUPABASE_URL/rest/v1/config_filters?select=id&limit=1"
           echo "GET $URL"
-          r=$(curl -sS -w '
-%{http_code}'             -H "apikey: $K"             -H "Authorization: Bearer $K"             "$URL" || true)
+          r=$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$URL" || true)
           code="${r##*$'\n'}"
           body="${r%$'\n'*}"
           echo "http $code body: $body"
           if [ "${code:-000}" -ge 400 ]; then
-            echo "::error::Supabase API unreachable"; exit 1
+            echo "::error::Supabase API unreachable"
+            exit 1
           fi
           echo '✓ Supabase API reachable'
 
-      - name: Install deps (if present)
-        shell: bash
-        run: |
-          set -e
-          if [ -f package.json ]; then
-            npm ci --ignore-scripts
-          fi
-
-      - name: Ingest with retries
+      - name: Ingest iNaturalist data (with retries)
         shell: bash
         run: |
           set -e
           for i in 1 2 3; do
-            if stdbuf -oL -eL node ingest.mjs | tee /dev/stderr; then
+            if node ingest.mjs; then
               echo '✅ ingest ok'
               exit 0
             fi
-            if [ $i -lt 3 ]; then
+            if [ "$i" -lt 3 ]; then
               sleep_sec=$(( (RANDOM % 7 + 5) * i ))
               echo "⚠️  transient failure, retry #$i (sleeping ${sleep_sec}s)"
-              sleep $sleep_sec
+              sleep "$sleep_sec"
             fi
           done
           echo '::error::Ingest failed after 3 attempts'
