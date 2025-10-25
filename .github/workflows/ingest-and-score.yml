@@ -1,17 +1,38 @@
-name: Ingest & Score
+name: iNaturalist Ingest
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: '*/30 * * * *'  # Every 30 minutes
 
+# Single workflow-level concurrency to avoid deadlocks
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  run:
-    runs-on: ubuntu-latest
+  ingest:
+    name: Ingest iNaturalist → Supabase
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
+      INAT_MODE: ${{ vars.INAT_MODE }}
+      TRIP_D1: ${{ vars.TRIP_D1 }}
+      TRIP_D2: ${{ vars.TRIP_D2 }}
+      TRIP_BBOX: ${{ vars.TRIP_BBOX }}
+      OBS_TABLE: ${{ vars.OBS_TABLE }}
+      OBS_ID_COLUMN: ${{ vars.OBS_ID_COLUMN }}
+      OBS_UPDATED_AT_COLUMN: ${{ vars.OBS_UPDATED_AT_COLUMN }}
+      SKIP_DELETES: ${{ vars.SKIP_DELETES }}
+      UPSERT_BATCH_SIZE: ${{ vars.UPSERT_BATCH_SIZE }}
+      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,8 +45,11 @@ jobs:
       - name: Preflight env check
         run: |
           set -euo pipefail
+          echo '=== Environment Check ==='
           ok=1
-          for v in SUPABASE_URL SUPABASE_SERVICE_KEY INAT_PROJECT_SLUG; do
+
+          # Required vars
+          for v in SUPABASE_URL INAT_PROJECT_SLUG; do
             val="${!v:-}"
             if [ -z "$val" ]; then
               echo "::error::Missing $v"; ok=0
@@ -33,83 +57,50 @@ jobs:
               echo "$v: present (len=${#val})"
             fi
           done
-          [ "$ok" = "1" ] || exit 1
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
 
-      - name: Verify active config_filters (adaptive)
+          # At least one Supabase key
+          if [ -z "${SUPABASE_SERVICE_KEY:-}${SUPABASE_SECRET_KEY:-}${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
+            echo "::error::Missing Supabase key (need SUPABASE_SERVICE_KEY or SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY)"
+            ok=0
+          else
+            echo "Supabase key: present"
+          fi
+
+          [ "$ok" = "1" ] || exit 1
+
+      - name: Supabase API reachability
         run: |
           set -euo pipefail
+          echo '=== Supabase Reachability Test ==='
           K="${SUPABASE_SERVICE_KEY:-${SUPABASE_SECRET_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-}}}"
-          BASE="$SUPABASE_URL/rest/v1/config_filters"
-          try_filter() {
-            col="$1"
-            url="$BASE?$col=eq.${INAT_PROJECT_SLUG}&select=id"
-            echo "→ probing column '$col' with: $url"
-            res="$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$url")" || true
-            code="${res##*$'\n'}"
-            body="${res%$'\n'*}"
-            echo "  http $code body: $body"
-            if [ "${code:-000}" -lt 400 ] && echo "$body" | grep -q '"id"'; then
-              echo "✓ matched on column '$col'"
-              echo "$body" > /tmp/config_filters_probe.json
-              return 0
-            fi
-            return 1
-          }
-          if ! try_filter slug; then
-            if ! try_filter project_slug; then
-              if ! try_filter inat_project_slug; then
-                # As a last resort, if the slug actually contains a numeric/uuid id, try id=eq.
-                if ! try_filter id; then
-                  # Final fallback: just ensure the table is reachable
-                  url="$BASE?select=id&limit=1"
-                  echo "→ fallback reachability: $url"
-                  res="$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$url")" || true
-                  code="${res##*$'\n'}"
-                  body="${res%$'\n'*}"
-                  echo "  http $code body: $body"
-                  if [ "${code:-000}" -ge 400 ] || ! echo "$body" | grep -q '"id"'; then
-                    echo "::error::config_filters not reachable or empty; please verify table/columns. Last body: $body"
-                    exit 1
-                  fi
-                  echo "✓ table reachable; proceeding without slug filter"
-                fi
-              fi
-            fi
+          URL="$SUPABASE_URL/rest/v1/config_filters?select=id&limit=1"
+          echo "GET $URL"
+          r=$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$URL" || true)
+          code="${r##*$'\n'}"
+          body="${r%$'\n'*}"
+          echo "http $code body: $body"
+          if [ "${code:-000}" -ge 400 ]; then
+            echo "::error::Supabase API unreachable"; exit 1
           fi
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          echo '✓ Supabase API reachable'
 
-      - name: Ingest (retry on transient errors)
+      - name: Run ingest.mjs (3x retry with jitter)
         run: |
           set -e
           for i in 1 2 3; do
             if node ingest.mjs; then
-              echo "✅ ingest ok"; exit 0
+              echo '✅ ingest ok'
+              exit 0
             fi
-            echo "⚠️ transient failure, retry #$i"; sleep $(( (RANDOM % 7 + 5) * i ))
+            if [ $i -lt 3 ]; then
+              sleep_sec=$(( (RANDOM % 7 + 5) * i ))
+              echo "⚠️  transient failure, retry #$i (sleeping ${sleep_sec}s)"
+              sleep $sleep_sec
+            fi
           done
-          echo "::error::Ingest failed after 3 attempts"; exit 1
-env:
-  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-  SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-  SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
-  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-  INAT_PROJECT_SLUG: ${{ secrets.INAT_PROJECT_SLUG }}
-  INAT_MODE: ${{ secrets.INAT_MODE }}
-  TRIP_D1: ${{ secrets.TRIP_D1 }}
-  TRIP_D2: ${{ secrets.TRIP_D2 }}
-  TRIP_BBOX: ${{ secrets.TRIP_BBOX }}
-  OBS_TABLE: ${{ secrets.OBS_TABLE }}
-  OBS_ID_COLUMN: ${{ secrets.OBS_ID_COLUMN }}
-  OBS_UPDATED_AT_COLUMN: ${{ secrets.OBS_UPDATED_AT_COLUMN }}
-  SKIP_DELETES: ${{ secrets.SKIP_DELETES }}
-  ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL }}
-  UPSERT_BATCH_SIZE: 100
+          echo '::error::Ingest failed after 3 attempts'
+          exit 1
+
+      - name: Summary
+        if: success()
+        run: echo "✅ Ingest completed at $(date -u)" >> $GITHUB_STEP_SUMMARY
