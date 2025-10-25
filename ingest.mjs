@@ -37,59 +37,27 @@ const MAX_PAGES = 200;
 const MAX_RETRIES = 6;
 const BASE_WAIT_MS = 500;
 const RUNS_TABLE = "score_runs";
-
-// Batch size for chunked UPSERTs (override with env UPSERT_BATCH_SIZE)
-const UPSERT_BATCH_SIZE = parseInt(process.env.UPSERT_BATCH_SIZE || "", 10) || 25;
-
 const USER_AGENT = "EcoQuestLive/ingest (+contact: maintainer)";
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function fetchJson(url, {
-  method = "GET",
-  headers = {},
-  params = null,
-  retry = 3,
-  retryLabel = "fetchJson"
-} = {}) {
-  // Clean query params: drop undefined/null/empty-string
-  if (params && typeof params === "object") {
-    const p = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (v === undefined || v === null || v === "") continue;
-      p.append(k, String(v));
-    }
-    const qs = p.toString();
-    if (qs) url += (url.includes("?") ? "&" : "?") + qs;
-  }
-
-  const ua = `ecology-bioblitz-scoring/1.0 (+https://github.com/ricktron/ecology-bioblitz-scoring)`;
-  const baseHeaders = {
-    "User-Agent": ua,
-    "Accept": "application/json",
-    "Connection": "keep-alive",
-    ...headers
-  };
-
-  let attempt = 0;
-  while (true) {
+async function fetchJson(url, { method = "GET", headers = {}, body, retryLabel } = {}) {
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const resp = await fetch(url, { method, headers: baseHeaders });
-      if (!resp.ok) {
-        const txt = await resp.text();
-        throw new Error(`${retryLabel} failed: ${resp.status} ${resp.statusText} ${txt}`);
+      const res = await fetch(url, { method, body, headers: { "User-Agent": USER_AGENT, ...headers } });
+      if (res.status === 429) {
+        const retryAfter = Number(res.headers.get("retry-after")) || 2;
+        await sleep((retryAfter + attempt) * 1000);
+        continue;
       }
-      return await resp.json();
-    } catch (e) {
-      if (attempt >= retry) throw e;
-      attempt++;
-      const backoff = 250 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
-      console.warn(`[${retryLabel}] attempt ${attempt} failed — backing off ${backoff}ms: ${e.message}`);
-      await new Promise(r => setTimeout(r, backoff));
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      return await res.json();
+    } catch (err) {
+      if (attempt === MAX_RETRIES) throw new Error(`${retryLabel || "fetch"} failed: ${err.message}`);
+      await sleep(BASE_WAIT_MS * Math.pow(2, attempt));
     }
   }
 }
-
 
 function sbHeaders() {
   return { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" };
@@ -100,67 +68,18 @@ async function sbSelect(path) {
   if (!res.ok) throw new Error(`Supabase SELECT ${path} → ${res.status} ${await res.text()}`);
   return await res.json();
 }
-async function sbUpsert(table, rows) {
-  if (!Array.isArray(rows)) throw new Error("sbUpsert rows must be an array");
-  if (rows.length === 0) return 0;
-
-  // Split into chunks to avoid timeouts and payload limits.
-  const size = Number.isFinite(+UPSERT_BATCH_SIZE) && +UPSERT_BATCH_SIZE > 0 ? +UPSERT_BATCH_SIZE : 25;
-
-  const url = `${SUPABASE_URL}/rest/v1/${table}`;
-  const headers = {
-    "apikey": SUPABASE_SERVICE_KEY,
-    "Authorization": `Bearer ${SUPABASE_SERVICE_KEY}`,
-    "Content-Type": "application/json",
-    // Keep EXACT header for upsert semantics
-    "Prefer": "resolution=merge-duplicates"
-  };
-
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  const chunks = [];
-  for (let i = 0; i < rows.length; i += size) chunks.push(rows.slice(i, i + size));
-
-  let total = 0;
-  for (let ci = 0; ci < chunks.length; ci++) {
-    const chunk = chunks[ci];
-    let attempt = 0;
-    while (true) {
-      try {
-        const resp = await fetch(url, { method: "POST", headers, body: JSON.stringify(chunk) });
-        const text = await resp.text();
-        if (!resp.ok) {
-          // Only retry on 5xx (including PostgREST timeouts) or explicit statement timeout codes
-          const is5xx = resp.status >= 500;
-          const hasStmtTimeout = /57014|statement timeout/i.test(text);
-          if (is5xx || hasStmtTimeout) {
-            if (attempt < 2) {
-              attempt++;
-              const backoff = 250 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
-              console.warn(`[UPSERT CHUNK RETRY ${attempt}] Supabase UPSERT ${table} → ${resp.status} ${text} — sleeping ${backoff}ms`);
-              await sleep(backoff);
-              continue;
-            }
-          }
-          throw new Error(`Supabase UPSERT ${table} → ${resp.status} ${text}`);
-        }
-        total += chunk.length;
-        break; // chunk succeeded
-      } catch (err) {
-        // Network type errors: one more retry with backoff if attempt < 2
-        if (attempt < 2) {
-          attempt++;
-          const backoff = 250 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 250);
-          console.warn(`[UPSERT CHUNK RETRY ${attempt}] ${err.message} — sleeping ${backoff}ms`);
-          await sleep(backoff);
-          continue;
-        }
-        throw err;
-      }
-    }
-  }
-  return total;
+async function sbUpsert(table, rows, onConflict) {
+  if (!rows.length) return { count: 0 };
+  const qs = onConflict ? `?on_conflict=${encodeURIComponent(onConflict)}` : "";
+  const url = `${SUPABASE_URL}/rest/v1/${table}${qs}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...sbHeaders(), Prefer: "resolution=merge-duplicates" },
+    body: JSON.stringify(rows),
+  });
+  if (!res.ok) throw new Error(`Supabase UPSERT ${table} → ${res.status} ${await res.text()}`);
+  return { count: rows.length };
 }
-
 async function sbDeleteByIds(table, idColumn, ids) {
   if (!ids.length) return { count: 0 };
   let total = 0;
