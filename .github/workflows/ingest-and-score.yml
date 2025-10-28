@@ -1,150 +1,203 @@
-name: Ingest iNaturalist → Supabase
+// ingest.mjs
+// Robust iNaturalist → Supabase ingestor
+// Node 20+ (fetch available).
+// Minimal upsert: only id + updated_at by default to be schema-safe.
 
-on:
-  workflow_dispatch:
-    inputs:
-      inat_project_slug:
-        description: "iNaturalist project slug (leave blank if using TRIP_* inputs)"
-        required: false
-      trip_d1:
-        description: "Trip start date YYYY-MM-DD (optional)"
-        required: false
-      trip_d2:
-        description: "Trip end date YYYY-MM-DD (optional)"
-        required: false
-      trip_bbox:
-        description: "Trip bounding box minLon,minLat,maxLon,maxLat (optional)"
-        required: false
-  push:
-    branches: [ main ]
-    paths:
-      - ".github/workflows/ingest-and-score.yml"
-      - "ingest.mjs"
-  schedule:
-    - cron: "*/30 * * * *"
+import { createClient } from "@supabase/supabase-js";
 
-permissions:
-  contents: read
+// ------------------ Env ------------------
+const env = (name, fallback = "") => (process.env[name] ?? fallback).trim();
 
-jobs:
-  ingest:
-    name: Ingest iNaturalist -> Supabase
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
+const SUPABASE_URL = env("SUPABASE_URL");
+const SUPABASE_SERVICE_KEY = env("SUPABASE_SERVICE_KEY") || env("SUPABASE_SECRET_KEY") || env("SUPABASE_SERVICE_ROLE_KEY"); // any one
+const TABLE = env("OBS_TABLE", "observations");
+const ID_COL = env("OBS_ID_COLUMN", "inat_obs_id");
+const UPDATED_AT_COL = env("OBS_UPDATED_AT_COLUMN", "updated_at");
+const BATCH_SIZE = parseInt(env("UPSERT_BATCH_SIZE", "50"), 10) || 50;
+const SKIP_DELETES = env("SKIP_DELETES", "") !== ""; // any non-empty truthy string means skip deletes
 
-    env:
-      # ----- Supabase (Secret or Variable) -----
-      SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
-      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY || vars.SUPABASE_SERVICE_KEY }}
-      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY || vars.SUPABASE_SECRET_KEY }}
-      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_ROLE_KEY }}
+// iNat inputs
+const INAT_USER_AGENT =
+  env("INAT_USER_AGENT") ||
+  `ecology-bioblitz-scoring/ingest (+github-actions@users.noreply.github.com)`;
 
-      # ----- iNaturalist / Trip inputs (Run‑time input -> Secret -> Variable) -----
-      INAT_PROJECT_SLUG: ${{ inputs.inat_project_slug || secrets.INAT_PROJECT_SLUG || vars.INAT_PROJECT_SLUG }}
-      TRIP_D1: ${{ inputs.trip_d1 || secrets.TRIP_D1 || vars.TRIP_D1 }}
-      TRIP_D2: ${{ inputs.trip_d2 || secrets.TRIP_D2 || vars.TRIP_D2 }}
-      TRIP_BBOX: ${{ inputs.trip_bbox || secrets.TRIP_BBOX || vars.TRIP_BBOX }}
+const INAT_EXPLICIT_MODE = env("INAT_MODE"); // optional
+const INAT_PROJECT_SLUG = env("INAT_PROJECT_SLUG");
+const TRIP_BBOX = env("TRIP_BBOX"); // "west,south,east,north"  (lon1,lat1,lon2,lat2)
+const TRIP_D1 = env("TRIP_D1"); // YYYY-MM-DD
+const TRIP_D2 = env("TRIP_D2"); // YYYY-MM-DD
+const UPDATED_SINCE = env("UPDATED_SINCE"); // ISO, optional
 
-      # ----- Table mapping (Variables with safe defaults) -----
-      OBS_TABLE: ${{ vars.OBS_TABLE || 'observations' }}
-      OBS_ID_COLUMN: ${{ vars.OBS_ID_COLUMN || 'inat_obs_id' }}
-      OBS_UPDATED_AT_COLUMN: ${{ vars.OBS_UPDATED_AT_COLUMN || 'updated_at' }}
-      SKIP_DELETES: ${{ vars.SKIP_DELETES }}
-      UPSERT_BATCH_SIZE: ${{ vars.UPSERT_BATCH_SIZE || '50' }}
+// Decide mode: prefer PROJECT when a slug is present
+let MODE = INAT_EXPLICIT_MODE
+  ? INAT_EXPLICIT_MODE.toUpperCase()
+  : (INAT_PROJECT_SLUG ? "PROJECT" : "TRIP");
 
-      # Optional alert webhook (Secret or Variable)
-      ALERT_WEBHOOK_URL: ${{ secrets.ALERT_WEBHOOK_URL || vars.ALERT_WEBHOOK_URL }}
+if (MODE === "PROJECT" && !INAT_PROJECT_SLUG) {
+  throw new Error("INAT_PROJECT_SLUG is required for PROJECT mode");
+}
+if (MODE === "TRIP" && !TRIP_BBOX && !TRIP_D1 && !TRIP_D2) {
+  // allow TRIP if *any* filter is present; otherwise it's ambiguous
+  // we don't force here to keep backward-compat, but warn.
+  console.warn("⚠️  TRIP mode without TRIP_* filters will query broadly; consider setting TRIP_BBOX/TRIP_D1/TRIP_D2.");
+}
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+// Print config line (parity with prior logs)
+console.log(
+  JSON.stringify({
+    mode: MODE,
+    table: TABLE,
+    id_column: ID_COL,
+    updated_at_column: UPDATED_AT_COL,
+    batch_size: BATCH_SIZE,
+    updated_since: UPDATED_SINCE || null,
+    trip_d1: TRIP_D1 || null,
+    trip_d2: TRIP_D2 || null,
+    trip_bbox: TRIP_BBOX || null,
+    skip_deletes: SKIP_DELETES,
+    has_soft_delete: false,
+  })
+);
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
+// ------------------ Helpers ------------------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-      - name: Install deps (if package.json present)
-        shell: bash
-        run: |
-          if [ -f package-lock.json ] || [ -f package.json ]; then
-            npm ci --ignore-scripts --no-audit || npm i
-          fi
+async function fetchJsonWithRetries(url, init = {}, { maxRetries = 7, initialDelayMs = 800 } = {}) {
+  let delay = initialDelayMs;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        "User-Agent": INAT_USER_AGENT,
+        Accept: "application/json",
+        ...init.headers,
+      },
+    }).catch((e) => ({ ok: false, status: 0, statusText: e.message }));
 
-      - name: Preflight – show effective config and validate
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo '=== Environment Check ==='
-          ok=1
+    if (res.ok) {
+      return res.json();
+    }
 
-          need_vars=(SUPABASE_URL)
-          for v in "${need_vars[@]}"; do
-            val="${!v:-}"
-            if [ -z "$val" ]; then
-              echo "::error::Missing $v"; ok=0
-            else
-              echo "$v: present (len=${#val})"
-            fi
-          done
+    // Read body safely for logging (without blowing up)
+    let body = "";
+    try { body = await res.text(); } catch { body = ""; }
 
-          # At least one Supabase key
-          if [ -z "${SUPABASE_SERVICE_KEY:-}${SUPABASE_SECRET_KEY:-}${SUPABASE_SERVICE_ROLE_KEY:-}" ]; then
-            echo "::error::Missing Supabase key (need SUPABASE_SERVICE_KEY or SUPABASE_SECRET_KEY or SUPABASE_SERVICE_ROLE_KEY)"
-            ok=0
-          else
-            echo "Supabase key: present"
-          fi
+    const status = res.status;
+    const retryAfter = res.headers?.get?.("retry-after");
+    const show = `HTTP ${status} ${res.statusText || ""}`.trim();
 
-          # Decide mode: PROJECT (slug) vs TRIP (bbox/dates)
-          MODE="PROJECT"
-          if [ -z "${INAT_PROJECT_SLUG:-}" ]; then
-            if [ -n "${TRIP_BBOX:-}" ] || [ -n "${TRIP_D1:-}" ] || [ -n "${TRIP_D2:-}" ]; then
-              MODE="TRIP"
-            else
-              echo "::error::Provide INAT_PROJECT_SLUG or any TRIP_* input"
-              ok=0
-            fi
-          fi
-          echo "Computed MODE=$MODE"
-          echo "OBS_TABLE=${OBS_TABLE:-observations}"
-          echo "OBS_ID_COLUMN=${OBS_ID_COLUMN:-inat_obs_id}"
-          echo "OBS_UPDATED_AT_COLUMN=${OBS_UPDATED_AT_COLUMN:-updated_at}"
+    // Rate limiting or temporary blocks
+    if ((status === 429 || status === 403 || status === 502 || status === 503) && attempt < maxRetries) {
+      // Honor Retry-After header (seconds) if present
+      let wait = delay + Math.floor(Math.random() * 300);
+      if (retryAfter) {
+        const ra = parseFloat(retryAfter);
+        if (!Number.isNaN(ra)) wait = Math.max(wait, Math.ceil(ra * 1000));
+      }
+      console.warn(`⚠️  ${show}, retry in ${wait}ms`);
+      await sleep(wait);
+      delay = Math.min(Math.floor(delay * 1.9), 45_000);
+      continue;
+    }
 
-          [ "$ok" = "1" ] || exit 1
+    throw new Error(`${show}: ${body.slice(0, 240)}`);
+  }
+  throw new Error(`Exceeded ${maxRetries} retries for ${url}`);
+}
 
-      - name: Supabase reachability
-        shell: bash
-        env:
-          K: ${{ secrets.SUPABASE_SERVICE_KEY || secrets.SUPABASE_SECRET_KEY || secrets.SUPABASE_SERVICE_ROLE_KEY || vars.SUPABASE_SERVICE_KEY || vars.SUPABASE_SECRET_KEY || vars.SUPABASE_SERVICE_ROLE_KEY }}
-        run: |
-          set -euo pipefail
-          echo '=== Supabase Reachability Test ==='
-          URL="$SUPABASE_URL/rest/v1/config_filters?select=id&limit=1"
-          echo "GET $URL"
-          r=$(curl -sS -w '\n%{http_code}' -H "apikey: $K" -H "Authorization: Bearer $K" "$URL" || true)
-          code="${r##*$'\n'}"
-          body="${r%$'\n'*}"
-          echo "http $code body: $body"
-          if [ "${code:-000}" -ge 400 ]; then
-            echo "::error::Supabase API unreachable"; exit 1
-          fi
-          echo '✓ Supabase API reachable'
+// ------------------ iNat query building ------------------
+function buildBaseParams() {
+  const p = new URLSearchParams();
+  p.set("order", "desc");
+  p.set("order_by", "id"); // enable id_below scrolling
+  p.set("per_page", "100"); // stay well under the 200 hard cap
 
-      - name: Run ingest with retries
-        shell: bash
-        run: |
-          set -e
-          for i in 1 2 3; do
-            if node ingest.mjs; then
-              echo '✅ ingest ok'
-              exit 0
-            fi
-            if [ $i -lt 3 ]; then
-              sleep_sec=$(( (RANDOM % 7 + 5) * i ))
-              echo "⚠️  transient failure, retry #$i (sleeping ${sleep_sec}s)"
-              sleep $sleep_sec
-            fi
-          done
-          echo '::error::Ingest failed after 3 attempts'
-          exit 1
+  if (MODE === "PROJECT") {
+    p.set("project_slug", INAT_PROJECT_SLUG);
+  } else { // TRIP
+    // Accept bbox as "west,south,east,north" (lon1,lat1,lon2,lat2)
+    if (TRIP_BBOX) {
+      const parts = TRIP_BBOX.split(",").map((s) => s.trim()).map(Number);
+      if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
+        const [west, south, east, north] = parts;
+        p.set("swlng", String(west));
+        p.set("swlat", String(south));
+        p.set("nelng", String(east));
+        p.set("nelat", String(north));
+      } else {
+        console.warn("⚠️  TRIP_BBOX invalid; expected 'west,south,east,north' (lon1,lat1,lon2,lat2)");
+      }
+    }
+    if (TRIP_D1) p.set("d1", TRIP_D1);
+    if (TRIP_D2) p.set("d2", TRIP_D2);
+  }
+
+  if (UPDATED_SINCE) p.set("updated_since", UPDATED_SINCE);
+  return p;
+}
+
+async function* iNatScroll() {
+  const base = "https://api.inaturalist.org/v1/observations";
+  const baseParams = buildBaseParams();
+  let idBelow = null;
+
+  while (true) {
+    const params = new URLSearchParams(baseParams);
+    if (idBelow) params.set("id_below", String(idBelow));
+    const url = `${base}?${params.toString()}`;
+    const json = await fetchJsonWithRetries(url, {});
+    const results = json?.results ?? [];
+    if (!results.length) break;
+    yield results;
+    idBelow = results[results.length - 1].id;
+    // polite pacing to reduce rate pressure
+    await sleep(350);
+  }
+}
+
+// ------------------ Supabase ------------------
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  throw new Error("Missing Supabase URL or key");
+}
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  auth: { persistSession: false },
+});
+
+async function upsertMinimal(batch) {
+  if (!batch.length) return;
+  const rows = batch.map((o) => ({
+    [ID_COL]: o.id,
+    [UPDATED_AT_COL]: o.updated_at || o.created_at || null,
+  }));
+  const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: ID_COL });
+  if (error) throw error;
+}
+
+// ------------------ Main ------------------
+async function main() {
+  let total = 0;
+  let buffer = [];
+
+  for await (const page of iNatScroll()) {
+    for (const obs of page) {
+      buffer.push(obs);
+      if (buffer.length >= BATCH_SIZE) {
+        await upsertMinimal(buffer);
+        total += buffer.length;
+        buffer = [];
+      }
+    }
+  }
+
+  if (buffer.length) {
+    await upsertMinimal(buffer);
+    total += buffer.length;
+  }
+
+  console.log(`✅ Upserted/verified ${total} observations into ${TABLE}`);
+}
+
+main().catch((err) => {
+  console.error(`❌ INGEST FAILED: ${err.message}`);
+  process.exit(1);
+});
