@@ -1,148 +1,224 @@
-name: Ingest iNaturalist Data (Multi-Location and Dynamic Members)
+// ingest.mjs
+// Robust iNaturalist → Supabase ingestor (ID Scrolling Version)
+// Node 20+ (fetch available).
 
-on:
-  workflow_dispatch: # Allows manual trigger
-  schedule:
-    # Run periodically (e.g., every 6 hours) to keep data fresh
-    - cron: '0 */6 * * *'
+import { createClient } from "@supabase/supabase-js";
 
-# Global Environment Variables
-env:
-  # Supabase Credentials (Ensure these secrets are set in the repository)
-  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-  # Use the Service Role Key for secure server-side access
-  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+// ------------------ Env ------------------
+const env = (name, fallback = "") => (process.env[name] ?? fallback).trim();
 
-  # Configuration
-  OBS_TABLE: observations
-  OBS_ID_COLUMN: inat_obs_id
-  OBS_UPDATED_AT_COLUMN: updated_at
-  UPSERT_BATCH_SIZE: 50
-  # The slug used to fetch the dynamic member list
-  PROJECT_SLUG_FOR_MEMBER_FETCH: nolan-ecology-costa-rica
+const SUPABASE_URL = env("SUPABASE_URL");
+// Use Service Role Key for secure access
+const SUPABASE_SERVICE_KEY = env("SUPABASE_SERVICE_KEY") || env("SUPABASE_SECRET_KEY") || env("SUPABASE_SERVICE_ROLE_KEY");
+const TABLE = env("OBS_TABLE", "observations");
+const ID_COL = env("OBS_ID_COLUMN", "inat_obs_id");
+const UPDATED_AT_COL = env("OBS_UPDATED_AT_COLUMN", "updated_at");
+const BATCH_SIZE = parseInt(env("UPSERT_BATCH_SIZE", "50"), 10) || 50;
 
-jobs:
-  # ===========================================================
-  # JOB 1: Location Ingestion (TRIP Mode Matrix)
-  # ===========================================================
-  ingest-locations:
-    runs-on: ubuntu-latest
-    strategy:
-      # CRITICAL: Ensure locations run sequentially (one after the other) 
-      # to respect the global 1 req/sec API limit.
-      max-parallel: 1
-      fail-fast: false
-      matrix:
-        # Define the configurations for the trips
-        include:
-          # Costa Rica (Tortuguero/La Selva) - Nov 2025
-          - location: "Costa Rica"
-            # BBOX (west,south,east,north) covering Sarapiqui and Tortuguero areas
-            bbox: "-84.05,10.40,-83.48,10.62"
-            d1: "2025-11-01"
-            d2: "2025-11-30"
-          
-          # Big Bend National Park - March 2026
-          - location: "Big Bend NP"
-            # BBOX covering Chisos, Rio Grande Village, Cottonwood
-            bbox: "-103.60,29.10,-102.95,29.30"
-            d1: "2026-03-01"
-            d2: "2026-03-31"
+// iNat inputs
+const INAT_USER_AGENT =
+  env("INAT_USER_AGENT") ||
+  `ecology-bioblitz-scoring/ingest (+github-actions@users.noreply.github.com)`;
 
-    name: Ingest Location - ${{ matrix.location }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+const INAT_EXPLICIT_MODE = env("INAT_MODE"); // optional, set by workflow
+const INAT_PROJECT_SLUG = env("INAT_PROJECT_SLUG");
+const INAT_USER_LOGIN = env("INAT_USER_LOGIN"); // For USER mode
+const TRIP_BBOX = env("TRIP_BBOX"); // "west,south,east,north"
+const TRIP_D1 = env("TRIP_D1"); // YYYY-MM-DD
+const TRIP_D2 = env("TRIP_D2"); // YYYY-MM-DD
+const UPDATED_SINCE = env("UPDATED_SINCE"); // ISO, optional
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+// Decide mode: prioritize USER, then explicit mode, then PROJECT, default to TRIP
+let MODE;
 
-      - name: Install dependencies
-        # Use npm ci if package-lock.json exists for reliability, otherwise npm i
-        run: if [ -f package-lock.json ]; then npm ci --ignore-scripts --no-audit; else npm i; fi
+if (INAT_USER_LOGIN) {
+  MODE = "USER";
+} else if (INAT_EXPLICIT_MODE) {
+  MODE = INAT_EXPLICIT_MODE.toUpperCase();
+} else if (INAT_PROJECT_SLUG) {
+  MODE = "PROJECT";
+} else {
+  MODE = "TRIP";
+}
 
-      - name: Run Ingestion (TRIP Mode)
-        run: |
-          echo "Starting TRIP mode ingestion for ${{ matrix.location }}"
-          echo "Dates: ${{ matrix.d1 }} to ${{ matrix.d2 }}"
-          echo "BBOX: ${{ matrix.bbox }}"
-          # Run the script, passing the matrix configuration via environment variables
-          node ingest.mjs
-        env:
-          INAT_MODE: TRIP
-          TRIP_BBOX: ${{ matrix.bbox }}
-          TRIP_D1: ${{ matrix.d1 }}
-          TRIP_D2: ${{ matrix.d2 }}
+// Validation and Safety Checks
+if (MODE === "USER" && !INAT_USER_LOGIN) {
+  throw new Error("INAT_USER_LOGIN is required for USER mode");
+}
+if (MODE === "PROJECT" && !INAT_PROJECT_SLUG) {
+  throw new Error("INAT_PROJECT_SLUG is required for PROJECT mode");
+}
+// CRITICAL SAFETY CHECK: Prevent accidental global download in TRIP mode
+if (MODE === "TRIP" && !TRIP_BBOX && !TRIP_D1 && !TRIP_D2 && !UPDATED_SINCE) {
+  console.error("❌ ERROR: TRIP mode requires at least one filter (TRIP_BBOX, TRIP_D1/D2, or UPDATED_SINCE) to prevent excessive load.");
+  process.exit(1);
+}
 
-  # ===========================================================
-  # JOB 2: Dynamic Member Ingestion (USER Mode)
-  # ===========================================================
-  ingest-members:
-    # This job waits for the entire location matrix to complete successfully
-    needs: ingest-locations
-    runs-on: ubuntu-latest
-    name: Ingest Dynamic Members
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+// Print config line
+console.log(
+  JSON.stringify({
+    mode: MODE,
+    user: INAT_USER_LOGIN || null,
+    project: INAT_PROJECT_SLUG || null,
+    table: TABLE,
+    batch_size: BATCH_SIZE,
+    trip_d1: TRIP_D1 || null,
+    trip_d2: TRIP_D2 || null,
+    trip_bbox: TRIP_BBOX || null,
+  })
+);
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
+// ------------------ Helpers ------------------
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-      - name: Install dependencies
-        run: if [ -f package-lock.json ]; then npm ci --ignore-scripts --no-audit; else npm i; fi
+async function fetchJsonWithRetries(url, init = {}, { maxRetries = 7, initialDelayMs = 800 } = {}) {
+  let delay = initialDelayMs;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const res = await fetch(url, {
+      ...init,
+      headers: {
+        "User-Agent": INAT_USER_AGENT,
+        Accept: "application/json",
+        ...init.headers,
+      },
+    }).catch((e) => ({ ok: false, status: 0, statusText: e.message }));
 
-      - name: Fetch Members and Ingest Data (USER Mode)
-        # This bash script fetches the member list dynamically and runs the ingest script sequentially for each user.
-        run: |
-          set -euo pipefail
-          PROJECT_SLUG="${{ env.PROJECT_SLUG_FOR_MEMBER_FETCH }}"
-          echo "Fetching members for project: $PROJECT_SLUG"
+    if (res.ok) {
+      return res.json();
+    }
 
-          MEMBER_LOGINS=$(mktemp)
+    const status = res.status;
+    const retryAfter = res.headers?.get?.("retry-after");
+    const show = `HTTP ${status} ${res.statusText || ""}`.trim();
 
-          # API Pagination loop to fetch all members (robustly handles projects of any size)
-          PAGE=1
-          while true; do
-            API_URL="https://api.inaturalist.org/v1/projects/$PROJECT_SLUG/members?page=$PAGE&per_page=100"
-            echo "Fetching $API_URL"
-            RESPONSE=$(curl -sS "$API_URL")
+    // Rate limiting (429/403) or temporary server errors (50x)
+    if ((status === 429 || status === 403 || status >= 500) && attempt < maxRetries) {
+      let wait = delay + Math.floor(Math.random() * 300);
+      // Honor Retry-After header if present
+      if (retryAfter) {
+        const ra = parseFloat(retryAfter);
+        if (!Number.isNaN(ra)) wait = Math.max(wait, Math.ceil(ra * 1000));
+      }
+      // Ensure minimum wait of 1 second if rate limited
+      wait = Math.max(wait, 1000);
+      
+      console.warn(`⚠️  [Attempt ${attempt}] ${show}, retry in ${wait}ms`);
+      await sleep(wait);
+      // Exponential backoff capped at 45s
+      delay = Math.min(Math.floor(delay * 1.9), 45_000);
+      continue;
+    }
 
-            # Validation using jq (standard tool on GitHub runners)
-            if ! echo "$RESPONSE" | jq empty; then
-              echo "::error::Failed to parse JSON from iNaturalist API. Check project slug and API status."
-              exit 1
-            fi
+    // Read body safely for logging
+    let body = "";
+    try { body = await res.text(); } catch { body = ""; }
+    throw new Error(`${show}: ${body.slice(0, 240)}`);
+  }
+  throw new Error(`Exceeded ${maxRetries} retries for ${url}`);
+}
 
-            echo "$RESPONSE" | jq -r '.results[].user.login' >> "$MEMBER_LOGINS"
+// ------------------ iNat query building ------------------
+function buildBaseParams() {
+  const p = new URLSearchParams();
+  p.set("order", "desc");
+  p.set("order_by", "id"); // enable id_below scrolling
+  p.set("per_page", "100"); // stay well under the 200 hard cap
 
-            # Check pagination metadata
-            RESULTS_COUNT=$(echo "$RESPONSE" | jq '.results | length // 0')
+  if (MODE === "USER") {
+    p.set("user_login", INAT_USER_LOGIN);
+  } else if (MODE === "PROJECT") {
+    p.set("project_slug", INAT_PROJECT_SLUG);
+  } else { // TRIP
+    // Accept bbox as "west,south,east,north" (lon1,lat1,lon2,lat2)
+    if (TRIP_BBOX) {
+      const parts = TRIP_BBOX.split(",").map((s) => s.trim()).map(Number);
+      if (parts.length === 4 && parts.every((n) => Number.isFinite(n))) {
+        const [west, south, east, north] = parts;
+        p.set("swlng", String(west));
+        p.set("swlat", String(south));
+        p.set("nelng", String(east));
+        p.set("nelat", String(north));
+      } else {
+        console.warn("⚠️  TRIP_BBOX invalid format; ignoring.");
+      }
+    }
+    if (TRIP_D1) p.set("d1", TRIP_D1);
+    if (TRIP_D2) p.set("d2", TRIP_D2);
+  }
 
-            # Exit loop if the response was empty (we reached the end)
-            if [ "$RESULTS_COUNT" -eq 0 ]; then
-              break
-            fi
+  if (UPDATED_SINCE) p.set("updated_since", UPDATED_SINCE);
+  return p;
+}
 
-            PAGE=$((PAGE + 1))
-            sleep 1 # Respect API rate limits (1 req/sec) during fetching
-          done
+// Robust cursor-based scrolling
+async function* iNatScroll() {
+  const base = "https://api.inaturalist.org/v1/observations";
+  const baseParams = buildBaseParams();
+  let idBelow = null;
 
-          echo "--- Found $(wc -l < "$MEMBER_LOGINS") members. Starting USER mode ingestion loop. ---"
+  while (true) {
+    const params = new URLSearchParams(baseParams);
+    if (idBelow) params.set("id_below", String(idBelow));
+    const url = `${base}?${params.toString()}`;
+    const json = await fetchJsonWithRetries(url, {});
+    const results = json?.results ?? [];
+    if (!results.length) break;
+    yield results;
+    idBelow = results[results.length - 1].id;
+    
+    // CRITICAL FIX: Polite pacing (1 req/sec recommended by iNat)
+    // The previous configuration caused 403 Forbidden errors due to excessive speed.
+    await sleep(1000);
+  }
+}
 
-          # Loop through each login and run the ingest script sequentially
-          while IFS= read -r LOGIN; do
-            if [ -n "$LOGIN" ]; then
-              echo "Ingesting data for user: $LOGIN"
-              # Provide the login. The script will detect USER mode.
-              # We run sequentially to maintain the 1 req/sec limit globally.
-              INAT_USER_LOGIN="$LOGIN" node ingest.mjs || echo "::warning::Ingestion failed for user $LOGIN, continuing..."
-            fi
-          done < "$MEMBER_LOGINS"
+// ------------------ Supabase ------------------
+if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
+  throw new Error("Missing Supabase URL or key");
+}
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  auth: { persistSession: false },
+});
 
-          rm "$MEMBER_LOGINS"
-          echo "✅ Finished ingesting data for all members."
+async function upsertMinimal(batch) {
+  if (!batch.length) return;
+  // Map the full iNat object to the minimal required columns for the DB
+  const rows = batch.map((o) => ({
+    [ID_COL]: o.id,
+    [UPDATED_AT_COL]: o.updated_at || o.created_at || null,
+  }));
+  const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: ID_COL });
+  if (error) throw error;
+}
+
+// ------------------ Main ------------------
+async function main() {
+  let total = 0;
+  let buffer = [];
+
+  for await (const page of iNatScroll()) {
+    for (const obs of page) {
+      buffer.push(obs);
+      if (buffer.length >= BATCH_SIZE) {
+        await upsertMinimal(buffer);
+        total += buffer.length;
+        buffer = [];
+        console.log(`... processed ${total} records ...`);
+      }
+    }
+  }
+
+  if (buffer.length) {
+    await upsertMinimal(buffer);
+    total += buffer.length;
+  }
+
+  console.log(`✅ [Mode: ${MODE}] Upserted/verified ${total} observations into ${TABLE}`);
+}
+
+main().catch((err) => {
+  console.error(`❌ INGEST FAILED: ${err.message}`);
+  // Ensure the error is visible in GitHub Actions logs
+  console.error("::error::" + err.message);
+  process.exit(1);
+});
