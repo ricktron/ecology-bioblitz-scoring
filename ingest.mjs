@@ -1,5 +1,5 @@
 // ingest.mjs
-// Robust iNaturalist → Supabase ingestor (ID Scrolling Version)
+// Robust iNaturalist → Supabase ingestor (ID Scrolling Version with Full Mapping)
 // Node 20+ (fetch available).
 
 import { createClient } from "@supabase/supabase-js";
@@ -11,8 +11,8 @@ const SUPABASE_URL = env("SUPABASE_URL");
 // Use Service Role Key for secure access
 const SUPABASE_SERVICE_KEY = env("SUPABASE_SERVICE_KEY") || env("SUPABASE_SECRET_KEY") || env("SUPABASE_SERVICE_ROLE_KEY");
 const TABLE = env("OBS_TABLE", "observations");
+// The primary key column name in Supabase that matches the iNat observation ID.
 const ID_COL = env("OBS_ID_COLUMN", "inat_obs_id");
-const UPDATED_AT_COL = env("OBS_UPDATED_AT_COLUMN", "updated_at");
 const BATCH_SIZE = parseInt(env("UPSERT_BATCH_SIZE", "50"), 10) || 50;
 
 // iNat inputs
@@ -59,12 +59,8 @@ console.log(
   JSON.stringify({
     mode: MODE,
     user: INAT_USER_LOGIN || null,
-    project: INAT_PROJECT_SLUG || null,
     table: TABLE,
     batch_size: BATCH_SIZE,
-    trip_d1: TRIP_D1 || null,
-    trip_d2: TRIP_D2 || null,
-    trip_bbox: TRIP_BBOX || null,
   })
 );
 
@@ -122,7 +118,11 @@ function buildBaseParams() {
   const p = new URLSearchParams();
   p.set("order", "desc");
   p.set("order_by", "id"); // enable id_below scrolling
-  p.set("per_page", "100"); // stay well under the 200 hard cap
+  p.set("per_page", "100");
+  
+  // Optimization: Request only the fields needed for the database mapping.
+  // We explicitly request taxon.ancestors to populate the taxonomic hierarchy.
+  p.set("fields", "id,created_at,updated_at,observed_on,time_observed_at,user.id,user.login,taxon.id,taxon.name,taxon.rank,taxon.rank_level,taxon.ancestors,quality_grade,location,geojson,cached_votes_total,faves_count,num_identification_agreements,num_identification_disagreements,captive,photos,sounds,ofvs");
 
   if (MODE === "USER") {
     p.set("user_login", INAT_USER_LOGIN);
@@ -167,12 +167,11 @@ async function* iNatScroll() {
     idBelow = results[results.length - 1].id;
     
     // CRITICAL FIX: Polite pacing (1 req/sec recommended by iNat)
-    // The previous configuration caused 403 Forbidden errors due to excessive speed.
     await sleep(1000);
   }
 }
 
-// ------------------ Supabase ------------------
+// ------------------ Supabase & Data Mapping ------------------
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   throw new Error("Missing Supabase URL or key");
 }
@@ -180,15 +179,113 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false },
 });
 
-async function upsertMinimal(batch) {
+// Helper to extract the primary photo URL (medium size)
+function getPhotoUrl(photos) {
+  if (!photos || photos.length === 0) return null;
+  // Try to get 'medium' by replacing 'square' (thumbnail) in the URL
+  return photos[0].url?.replace("/square.", "/medium.") || photos[0].url;
+}
+
+// Robust helper to find a specific rank in the ancestors array
+// This is safer than using fixed array indices.
+function getAncestorRank(ancestors, rank) {
+    if (!ancestors) return null;
+    const ancestor = ancestors.find(a => a.rank === rank);
+    return ancestor ? ancestor.name : null;
+}
+
+// Comprehensive mapping from iNat API object to Supabase schema
+async function upsertObservations(batch) {
   if (!batch.length) return;
-  // Map the full iNat object to the minimal required columns for the DB
-  const rows = batch.map((o) => ({
-    [ID_COL]: o.id,
-    [UPDATED_AT_COL]: o.updated_at || o.created_at || null,
-  }));
+
+  const rows = batch.map((o) => {
+    // Extract coordinates robustly
+    let latitude = null;
+    let longitude = null;
+    
+    // 1. Prefer GeoJSON (standard format: [longitude, latitude])
+    if (o.geojson && o.geojson.coordinates && o.geojson.coordinates.length === 2) {
+        longitude = o.geojson.coordinates[0];
+        latitude = o.geojson.coordinates[1];
+    } 
+    // 2. Fallback to 'location' string (iNat format: "latitude,longitude")
+    else if (o.location) {
+        const coords = o.location.split(',');
+        if (coords.length === 2) {
+            latitude = parseFloat(coords[0]);
+            longitude = parseFloat(coords[1]);
+        }
+    }
+    
+    // Ensure coordinates are valid numbers
+    if (!Number.isFinite(latitude)) latitude = null;
+    if (!Number.isFinite(longitude)) longitude = null;
+
+    
+    // Map to the database schema (Column names must match your Supabase table)
+    return {
+      [ID_COL]: o.id, // e.g., inat_obs_id
+      
+      // FIX: Ensure user_id is mapped to resolve the NOT NULL constraint error
+      user_id: o.user?.id || null, 
+      user_login: o.user?.login || null,
+      
+      // Timestamps (using standard ISO formats)
+      observed_on: o.observed_on || null, // Date only (YYYY-MM-DD)
+      time_observed_at: o.time_observed_at || null, // Full timestamp
+      created_at: o.created_at,
+      updated_at: o.updated_at || o.created_at,
+      
+      // Location
+      latitude: latitude,
+      longitude: longitude,
+      
+      // Taxon Information
+      taxon_id: o.taxon?.id || null,
+      taxon_name: o.taxon?.name || null,
+      taxon_rank: o.taxon?.rank || null,
+      taxon_rank_level: o.taxon?.rank_level || null,
+      
+      // Taxonomic Hierarchy (derived from ancestors)
+      kingdom: getAncestorRank(o.taxon?.ancestors, 'kingdom'),
+      phylum: getAncestorRank(o.taxon?.ancestors, 'phylum'),
+      class: getAncestorRank(o.taxon?.ancestors, 'class'),
+      order: getAncestorRank(o.taxon?.ancestors, 'order'),
+      family: getAncestorRank(o.taxon?.ancestors, 'family'),
+      genus: getAncestorRank(o.taxon?.ancestors, 'genus'),
+
+      // Metrics and Quality
+      quality_grade: o.quality_grade,
+      is_research: o.quality_grade === "research",
+      votes: o.cached_votes_total || 0,
+      faves: o.faves_count || 0,
+      ident_agreements: o.num_identification_agreements || 0,
+      ident_disagreements: o.num_identification_disagreements || 0,
+      
+      // Media
+      photo_url: getPhotoUrl(o.photos),
+      photo_count: o.photos?.length || 0,
+      sound_count: o.sounds?.length || 0,
+      
+      // Misc
+      is_captive: o.captive || false,
+      ofvs: o.ofvs || [], // Observation Field Values (JSONB)
+    };
+  });
+
+  // Perform the UPSERT. The conflict column must match the ID_COL environment variable.
   const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: ID_COL });
-  if (error) throw error;
+  
+  if (error) {
+    // Log detailed error information for debugging
+    console.error("❌ Supabase UPSERT Error:", JSON.stringify(error, null, 2));
+    // If it's a constraint violation, log an example row that failed
+    if (error.code === '23502') { // PostgreSQL code for not-null violation
+        console.error("⚠️ Data causing error (check for unexpected nulls in required columns):", JSON.stringify(rows[0], null, 2));
+    }
+    // Throw the error so the node process exits with failure
+    throw new Error(`Supabase error: ${error.message} (Code: ${error.code})`);
+  }
 }
 
 // ------------------ Main ------------------
@@ -200,7 +297,8 @@ async function main() {
     for (const obs of page) {
       buffer.push(obs);
       if (buffer.length >= BATCH_SIZE) {
-        await upsertMinimal(buffer);
+        // Use the comprehensive function
+        await upsertObservations(buffer);
         total += buffer.length;
         buffer = [];
         console.log(`... processed ${total} records ...`);
@@ -209,7 +307,8 @@ async function main() {
   }
 
   if (buffer.length) {
-    await upsertMinimal(buffer);
+    // Use the comprehensive function
+    await upsertObservations(buffer);
     total += buffer.length;
   }
 
