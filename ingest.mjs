@@ -1,5 +1,5 @@
 // ingest.mjs
-// Robust iNaturalist → Supabase ingestor (ID Scrolling Version with Full Mapping)
+// Robust iNaturalist → Supabase ingestor (ID Scrolling Version with Full, Standardized Mapping)
 // Node 20+ (fetch available).
 
 import { createClient } from "@supabase/supabase-js";
@@ -187,7 +187,6 @@ function getPhotoUrl(photos) {
 }
 
 // Robust helper to find a specific rank in the ancestors array
-// This is safer than using fixed array indices.
 function getAncestorRank(ancestors, rank) {
     if (!ancestors) return null;
     const ancestor = ancestors.find(a => a.rank === rank);
@@ -222,11 +221,10 @@ async function upsertObservations(batch) {
     if (!Number.isFinite(longitude)) longitude = null;
 
     
-    // Map to the database schema (Column names must match your Supabase table)
+    // Map to the database schema (Column names must match the standardized Supabase table)
     return {
       [ID_COL]: o.id, // e.g., inat_obs_id
       
-      // FIX: Ensure user_id is mapped to resolve the NOT NULL constraint error
       user_id: o.user?.id || null, 
       user_login: o.user?.login || null,
       
@@ -247,12 +245,13 @@ async function upsertObservations(batch) {
       taxon_rank_level: o.taxon?.rank_level || null,
       
       // Taxonomic Hierarchy (derived from ancestors)
-      kingdom: getAncestorRank(o.taxon?.ancestors, 'kingdom'),
-      phylum: getAncestorRank(o.taxon?.ancestors, 'phylum'),
-      class: getAncestorRank(o.taxon?.ancestors, 'class'),
-      order: getAncestorRank(o.taxon?.ancestors, 'order'),
-      family: getAncestorRank(o.taxon?.ancestors, 'family'),
-      genus: getAncestorRank(o.taxon?.ancestors, 'genus'),
+      // FIX: Renamed to standardized taxon_* prefix to align with DB schema and avoid reserved keywords
+      taxon_kingdom: getAncestorRank(o.taxon?.ancestors, 'kingdom'),
+      taxon_phylum: getAncestorRank(o.taxon?.ancestors, 'phylum'),
+      taxon_class: getAncestorRank(o.taxon?.ancestors, 'class'),
+      taxon_order: getAncestorRank(o.taxon?.ancestors, 'order'),
+      taxon_family: getAncestorRank(o.taxon?.ancestors, 'family'),
+      taxon_genus: getAncestorRank(o.taxon?.ancestors, 'genus'),
 
       // Metrics and Quality
       quality_grade: o.quality_grade,
@@ -279,10 +278,6 @@ async function upsertObservations(batch) {
   if (error) {
     // Log detailed error information for debugging
     console.error("❌ Supabase UPSERT Error:", JSON.stringify(error, null, 2));
-    // If it's a constraint violation, log an example row that failed
-    if (error.code === '23502') { // PostgreSQL code for not-null violation
-        console.error("⚠️ Data causing error (check for unexpected nulls in required columns):", JSON.stringify(rows[0], null, 2));
-    }
     // Throw the error so the node process exits with failure
     throw new Error(`Supabase error: ${error.message} (Code: ${error.code})`);
   }
@@ -297,7 +292,6 @@ async function main() {
     for (const obs of page) {
       buffer.push(obs);
       if (buffer.length >= BATCH_SIZE) {
-        // Use the comprehensive function
         await upsertObservations(buffer);
         total += buffer.length;
         buffer = [];
@@ -307,7 +301,6 @@ async function main() {
   }
 
   if (buffer.length) {
-    // Use the comprehensive function
     await upsertObservations(buffer);
     total += buffer.length;
   }
