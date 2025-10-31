@@ -1,10 +1,13 @@
 name: Ingest iNaturalist Data (Multi-Location and Dynamic Members)
 
 on:
-  workflow_dispatch: # Allows manual trigger
   schedule:
-    # Run periodically (e.g., every 6 hours) to keep data fresh
-    - cron: '0 */6 * * *'
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 
 # Global Environment Variables
 env:
