@@ -269,11 +269,21 @@ async function upsertObservations(batch) {
       // Misc
       is_captive: o.captive || false,
       ofvs: o.ofvs || [], // Observation Field Values (JSONB)
+      
+      // Raw JSON: Store original observation data (required, cannot be null)
+      raw_json: o,
     };
   });
 
+  // Guard raw_json to prevent 23502 (NOT NULL constraint violation)
+  const missingRawJson = rows.filter(r => !r.raw_json).length;
+  if (missingRawJson > 0) {
+    console.warn(`⚠️  ${missingRawJson} row(s) missing raw_json, filling with empty object`);
+  }
+  const safeRows = rows.map(r => ({ ...r, raw_json: r?.raw_json ?? {} }));
+
   // Perform the UPSERT. The conflict column must match the ID_COL environment variable.
-  const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: ID_COL });
+  const { error } = await supabase.from(TABLE).upsert(safeRows, { onConflict: ID_COL });
   
   if (error) {
     // Log detailed error information for debugging
